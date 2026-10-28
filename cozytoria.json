@@ -6,5 +6,8 @@
   "github": "CozyOrg/cozytoria",
   "server": {
     "modpackSource": "release"
+  },
+  "discord": {
+    "mention": "@everyone"
   }
 }

@@ -96,8 +96,9 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
 - Größere Änderungen also auf einem Branch machen, per PR mergen, fertig.
 - Die Release-Notes enthalten einen Changelog seit dem letzten Release: Craftoria-Update, neue, aktualisierte und
   entfernte Mods sowie die Commit-Betreffs. Gute Commit-Messages landen also direkt bei den Spielern.
-- Jedes Release wird zusätzlich im Discord angekündigt, mit Changelog, allen zusätzlichen Mods und Download-Links
-  (siehe Einrichtung).
+- Jedes Release wird zusätzlich im Discord angekündigt: Ping, großer Download-Link, Changelog und alle zusätzlichen
+  Mods (siehe Einrichtung). Wer gepingt wird, steht in `cozytoria.json` unter `discord.mention`: `@everyone`,
+  eine Rolle als `<@&ROLLEN-ID>` oder leer für keinen Ping.
 
 ## Craftoria-Updates
 

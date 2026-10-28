@@ -517,11 +517,17 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
             lines.extend(["", f"### {title}"] + [f"- {item}" for item in items])
     write_text(DIST / "release-notes.md", "\n".join(lines) + "\n")
 
-    # Fett statt ###, das sieht in Discord-Embeds überall gleich aus
-    discord = [
-        intro,
-        f"**Download:** [Client]({download_url}/{client_zip.name}) · [Server]({download_url}/{server_zip.name})",
+    # Download groß in die Nachricht selbst, dort rendern Überschriften sicher. <...> unterdrückt Link-Vorschauen.
+    content = [
+        cfg.get("discord", {}).get("mention", ""),
+        f"## 🎉 {cfg['name']} {version} ist da!",
+        f"### ⬇️ [Client herunterladen](<{download_url}/{client_zip.name}>)",
+        "Installieren und Updaten: CurseForge App → **Create Custom Profile** → **Import** → ZIP auswählen",
+        f"🖥️ Server: [{server_zip.name}](<{download_url}/{server_zip.name}>)",
     ]
+
+    # Im Embed fett statt ###, das sieht überall gleich aus
+    discord = [intro]
     for title, items, public in sections:
         if public and items:
             discord.extend(["", f"**{title}**"] + [f"- {item}" for item in items])
@@ -530,8 +536,9 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
         description = description[:DISCORD_DESCRIPTION_LIMIT].rsplit("\n", 1)[0] + f"\n… [alles im Release]({release_url})"
     save_json(BUILD / "discord-payload.json", {
         "username": cfg["name"],
-        # Commit-Betreffs sollen niemanden pingen
-        "allowed_mentions": {"parse": []},
+        "content": "\n".join(line for line in content if line),
+        # Erwähnungen in Embeds (z. B. in Commit-Betreffs) pingen nie, nur die aus cozytoria.json im content
+        "allowed_mentions": {"parse": ["everyone", "roles"]},
         "embeds": [{
             "title": f"{cfg['name']} {version}",
             "url": release_url,
