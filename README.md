@@ -90,10 +90,10 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
 
 ## Releases
 
-- **Push auf `main`** (außer reine `.md`-Änderungen) baut und veröffentlicht ein Release mit der nächsten Nummer,
-  z. B. `1.37.0-cozy.1`, `1.37.0-cozy.2`, nach einem Craftoria-Update wieder ab `1.38.0-cozy.1`.
-- **Pull Requests und andere Branches** bauen nur, die ZIPs hängen als Artefakt am Workflow-Run.
-- Größere Änderungen also auf einem Branch machen, per PR mergen, fertig.
+- **Releases gibt es nur per Hand:** Actions → **Build** → **Run workflow** auf `main`, oder
+  `gh workflow run build.yml -R CozyOrg/cozytoria --ref main`. Das baut und veröffentlicht ein Release mit der
+  nächsten Nummer, z. B. `1.37.0-cozy.1`, `1.37.0-cozy.2`, nach einem Craftoria-Update wieder ab `1.38.0-cozy.1`.
+- **Pushes und Pull Requests** bauen nur zur Kontrolle, die ZIPs hängen als Artefakt am Workflow-Run.
 - Die Release-Notes enthalten einen Changelog seit dem letzten Release: Craftoria-Update, neue, aktualisierte und
   entfernte Mods sowie die Commit-Betreffs. Gute Commit-Messages landen also direkt bei den Spielern.
 - Jedes Release wird zusätzlich im Discord angekündigt: Ping, großer Download-Link, Changelog und alle zusätzlichen
@@ -105,8 +105,8 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
 Der Workflow **Craftoria upstream** schaut jeden Morgen nach. Craftoria hat keine GitHub-Releases; als Release gilt
 der Commit, der in `server_files/server-setup-config.yaml` die `modpackUrl` auf den neuen CurseForge-Download setzt
 (das macht deren Upload-Skript erst nach dem Upload). Findet er einen neuen, öffnet er einen PR mit dem neuen
-`upstream.json` und stößt dafür einen Build an. Ist der grün und laufen eure Mods noch: mergen, das Release kommt
-automatisch. Manuell auslösen geht unter Actions → Craftoria upstream → Run workflow.
+`upstream.json` und stößt dafür einen Build an. Ist der grün und laufen eure Mods noch: mergen und das Release per Hand
+starten (siehe oben). Den Check selbst manuell auslösen geht unter Actions → Craftoria upstream → Run workflow.
 
 ## Einmalige Einrichtung auf GitHub
 

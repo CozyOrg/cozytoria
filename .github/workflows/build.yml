@@ -1,6 +1,7 @@
 name: Build
 
-# Push auf main = neues Release. PRs und andere Branches bauen nur und hängen die ZIPs als Artefakt an.
+# Releases nur per Hand: Actions → Build → Run workflow auf main.
+# Pushes, PRs und Läufe auf anderen Branches bauen nur und hängen die ZIPs als Artefakt an.
 on:
   push:
     branches: [main]
@@ -20,7 +21,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      IS_RELEASE: ${{ github.ref == 'refs/heads/main' }}
+      IS_RELEASE: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

@@ -672,7 +672,7 @@ def cmd_check_upstream(args):
         "- [ ] Der Build für diesen Branch ist grün (Patches passen, keine Warnungen zu remove.txt)",
         "- [ ] Eigene Mods laufen noch (Testserver mit dem Build-Artefakt starten)",
         "",
-        "Nach dem Merge baut der Build-Workflow automatisch ein neues Release.",
+        "Nach dem Merge das Release unter Actions → Build → Run workflow (main) starten.",
         "",
     ]))
     set_output("changed", "true")
