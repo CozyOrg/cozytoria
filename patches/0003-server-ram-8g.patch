@@ -1,0 +1,16 @@
+diff --git a/server_files/server-setup-config.yaml b/server_files/server-setup-config.yaml
+index 82ae8e6..7315841 100644
+--- a/server_files/server-setup-config.yaml
++++ b/server_files/server-setup-config.yaml
+@@ -66,9 +66,9 @@ install:
+ 
+ launch:
+   # specifies the max amount of ram the server is supposed to launch with (Xmx)
+-  maxRam: 5G
++  maxRam: 8G
+   # specifies the minimal amount of ram the server is supposed to launch with (Xms)
+-  minRam: 3G
++  minRam: 4G
+   # specifies whether the server is supposed to auto restart after crash
+   autoRestart: false
+   javaArgs:
