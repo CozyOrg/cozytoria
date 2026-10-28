@@ -1,0 +1,5 @@
+# Dateien aus Craftoria, die in Cozytoria nicht enthalten sein sollen.
+# Ein Pfad oder Glob pro Zeile, relativ zum Craftoria-Repo, z. B.:
+#   mods/sodium.pw.toml
+#   kubejs/server_scripts/irgendwas/*.js
+# Wird automatisch ergänzt, wenn du `python3 scripts/cozytoria.py packwiz remove <mod>` nutzt.

@@ -1,0 +1,48 @@
+name: Craftoria upstream
+
+# Schaut täglich nach einem neuen Craftoria-Release und öffnet dafür einen PR.
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Look for a new Craftoria release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/cozytoria.py check-upstream
+
+      - name: Open pull request
+        if: steps.upstream.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.upstream.outputs.version }}
+          COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          branch="upstream/craftoria-${VERSION}-${COMMIT:0:7}"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "Branch $branch gibt es schon, nichts zu tun"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "chore(upstream): update Craftoria to ${VERSION}"
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Craftoria ${VERSION}" \
+            --body-file build/upstream-pr.md
+          # Mit dem GITHUB_TOKEN erstellte PRs lösen keine pull_request-Workflows aus, daher Build direkt anstoßen
+          gh workflow run build.yml --ref "$branch"

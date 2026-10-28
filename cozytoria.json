@@ -1,0 +1,10 @@
+{
+  "name": "Cozytoria",
+  "author": "CozyOrg",
+  "description": "Craftoria mit Extras von CozyOrg",
+  "versionSuffix": "cozy",
+  "github": "CozyOrg/cozytoria",
+  "server": {
+    "modpackSource": "release"
+  }
+}

@@ -1,0 +1,60 @@
+name: Build
+
+# Push auf main = neues Release. PRs und andere Branches bauen nur und hängen die ZIPs als Artefakt an.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      IS_RELEASE: ${{ github.ref == 'refs/heads/main' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # Tags werden für die fortlaufende Versionsnummer gebraucht
+          fetch-depth: 0
+
+      - name: Cache packwiz
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/tools
+            build/cache
+          key: packwiz-${{ hashFiles('upstream.json', 'overlay/**/*.pw.toml') }}
+          restore-keys: packwiz-
+
+      - name: Build packs
+        id: build
+        run: python3 scripts/cozytoria.py build ${{ env.IS_RELEASE == 'true' && '--release' || '' }}
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.name }}-${{ steps.build.outputs.version }}
+          path: dist/
+
+      - name: Create GitHub release
+        if: env.IS_RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.build.outputs.version }}
+          NAME: ${{ steps.build.outputs.name }}
+        run: |
+          gh release create "$VERSION" dist/*.zip \
+            --target "$GITHUB_SHA" \
+            --title "$NAME $VERSION" \
+            --notes-file dist/release-notes.md
