@@ -6,6 +6,7 @@
   packwiz <args>      packwiz auf dem kombinierten Pack ausführen; neue oder geänderte
                       Metadaten landen in overlay/, entfernte Craftoria-Mods in remove.txt
   check-upstream      Nach einem neuen Craftoria-Release suchen und upstream.json anpassen
+  notify-discord      Das zuletzt gebaute Release im Discord ankündigen (Webhook aus DISCORD_WEBHOOK_URL)
 
 Braucht nur Python 3.9+ und git, packwiz wird automatisch heruntergeladen.
 """
@@ -21,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -46,6 +48,8 @@ METADATA_DIRS = ("mods", "resourcepacks", "shaderpacks")
 SERVER_CONFIG = "server-setup-config.yaml"
 UPSTREAM_SERVER_CONFIG = "server_files/" + SERVER_CONFIG
 IGNORED_OVERLAY_FILES = (".gitkeep", ".DS_Store")
+# Discord erlaubt 4096 Zeichen pro Embed, der Rest bleibt für den Hinweis aufs vollständige Release
+DISCORD_DESCRIPTION_LIMIT = 3900
 
 IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 warnings = []
@@ -78,6 +82,12 @@ def run(cmd, cwd=None, env=None, capture=False):
         stdout=subprocess.PIPE if capture else None,
     )
     return result.stdout.strip() if capture else None
+
+
+def git_output(*args):
+    # Wie run(), liefert aber None statt abzubrechen, z. B. wenn es noch keinen Release-Tag gibt
+    result = subprocess.run(["git", *args], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return result.stdout if result.returncode == 0 else None
 
 
 def read_text(path):
@@ -166,15 +176,16 @@ def metadata_files(base):
 
 
 def read_metadata(path):
-    text = read_text(path)
+    return parse_metadata(read_text(path), path.name)
 
+
+def parse_metadata(text, fallback_name):
     def field(pattern):
         match = re.search(pattern, text, re.M)
         return match.group(1) if match else None
 
     return {
-        "path": path,
-        "name": field(r'^name\s*=\s*"([^"]+)"') or path.name,
+        "name": field(r'^name\s*=\s*"([^"]+)"') or fallback_name,
         "filename": field(r'^filename\s*=\s*"([^"]+)"'),
         "side": field(r'^side\s*=\s*"(\w+)"') or "both",
         "cf": field(r"^project-id\s*=\s*(\d+)") if "[update.curseforge]" in text else None,
@@ -218,23 +229,35 @@ def export_upstream():
         fail("git archive für Craftoria ist fehlgeschlagen")
 
 
+def removal_patterns(text):
+    patterns = []
+    for line in text.splitlines():
+        pattern = line.split("#", 1)[0].strip().lstrip("/")
+        if pattern:
+            patterns.append(pattern)
+    return patterns
+
+
 def apply_removals():
     removed = []
     if not REMOVE_FILE.exists():
         return removed
-    for line in read_text(REMOVE_FILE).splitlines():
-        pattern = line.split("#", 1)[0].strip().lstrip("/")
-        if not pattern:
-            continue
+    for pattern in removal_patterns(read_text(REMOVE_FILE)):
         matches = sorted(PACK_DIR.glob(pattern))
         if not matches:
             warn(f"remove.txt: '{pattern}' gibt es in Craftoria nicht (mehr)")
         for path in matches:
+            # Bei ** kann der Pfad schon mit seinem Elternordner verschwunden sein
+            if not path.exists():
+                continue
+            rel = path.relative_to(PACK_DIR).as_posix()
             if path.is_dir():
+                name = f"`{rel}/`"
                 shutil.rmtree(path)
             else:
+                name = read_metadata(path)["name"] if rel.endswith(".pw.toml") else f"`{rel}`"
                 path.unlink()
-            removed.append(path.relative_to(PACK_DIR).as_posix())
+            removed.append({"pattern": pattern, "path": rel, "name": name})
     return removed
 
 
@@ -417,31 +440,105 @@ def build_server(cfg, version, client_zip, info):
     return server_zip
 
 
-def write_release_notes(lock, info, client_zip, server_zip):
+def changelog(cfg, lock, info):
+    # Vergleicht mit dem letzten Release-Tag: (Tag, Änderungen an Craftoria/Mods, Commit-Betreffs)
+    previous = git_output("describe", "--tags", "--abbrev=0", "--match", f"*-{cfg['versionSuffix']}.*", "HEAD")
+    if not previous:
+        return None, [], []
+    previous = previous.strip()
+    changes = []
+
+    repo = lock["repo"]
+    previous_lock = json.loads(git_output("show", f"{previous}:upstream.json") or "{}")
+    if previous_lock and previous_lock["commit"] != lock["commit"]:
+        changes.append(
+            f"Craftoria {previous_lock['version']} → {lock['version']} "
+            f"([Änderungen](https://github.com/{repo}/compare/{previous_lock['commit']}...{lock['commit']}))"
+        )
+
+    labels = {"A": "Neu", "M": "Aktualisiert", "D": "Entfernt"}
+    diff = git_output("diff", "--name-status", "--no-renames", previous, "HEAD", "--", "overlay") or ""
+    for line in diff.splitlines():
+        status, path = line.split("\t", 1)
+        rel = path[len("overlay/"):]
+        if status not in labels or not rel.endswith(".pw.toml") or rel.split("/", 1)[0] not in METADATA_DIRS:
+            continue
+        text = git_output("show", f"{previous if status == 'D' else 'HEAD'}:{path}") or ""
+        changes.append(f"{labels[status]}: {parse_metadata(text, Path(rel).name)['name']}")
+
+    removed_names = {}
+    for entry in info["removed"]:
+        removed_names.setdefault(entry["pattern"], []).append(entry["name"])
+    previous_patterns = removal_patterns(git_output("show", f"{previous}:remove.txt") or "")
+    current_patterns = removal_patterns(read_text(REMOVE_FILE)) if REMOVE_FILE.exists() else []
+    for pattern in current_patterns:
+        if pattern not in previous_patterns:
+            changes.append("Aus Craftoria entfernt: " + ", ".join(removed_names.get(pattern, [f"`{pattern}`"])))
+    for pattern in previous_patterns:
+        if pattern not in current_patterns:
+            changes.append(f"Wieder wie in Craftoria: `{pattern}`")
+
+    commits = (git_output("log", "--no-merges", "--format=%s", f"{previous}..HEAD") or "").splitlines()
+    return previous, changes, commits
+
+
+def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     repo, commit = lock["repo"], lock["commit"]
-    lines = [
+    release_url = f"https://github.com/{github_repo(cfg)}/releases/tag/{version}"
+    download_url = f"https://github.com/{github_repo(cfg)}/releases/download/{version}"
+    intro = (
         f"Basiert auf **Craftoria {lock['version']}** "
         f"([{commit[:7]}](https://github.com/{repo}/commit/{commit}), "
-        f"[Changelog](https://github.com/{repo}/blob/{commit}/changelogs/CHANGELOG.md)).",
-        "",
-        "### Downloads",
-        f"- `{client_zip.name}`: Client, in der CurseForge App importieren",
-        f"- `{server_zip.name}`: Server, entpacken und `startserver.sh` bzw. `startserver.bat` starten",
+        f"[Changelog](https://github.com/{repo}/blob/{commit}/changelogs/CHANGELOG.md))."
+    )
+    previous, changes, commits = changelog(cfg, lock, info)
+
+    # (Titel, Einträge, auch im Discord zeigen)
+    sections = [
+        ("Downloads", [
+            f"`{client_zip.name}`: Client, in der CurseForge App importieren",
+            f"`{server_zip.name}`: Server, entpacken und `startserver.sh` bzw. `startserver.bat` starten",
+        ], False),
+        (f"Änderungen seit {previous}", changes, True),
+        (f"Commits seit {previous}", [f"`{subject}`" for subject in commits], True),
+        ("Zusätzliche Mods und Packs", [
+            mod["name"] + (" (nur Client)" if mod["side"] == "client" else "") for mod in info["overlay_mods"]
+        ], True),
+        ("Ersetzt", [f"`{old}` durch `{new}`" for old, new in info["replaced"]], False),
+        ("Aus Craftoria entfernt", [entry["name"] for entry in info["removed"]], True),
+        ("Eigene Dateien", [f"`{rel}`" for rel in info["overlay_files"]], False),
+        ("Patches", [f"`{name}`" for name in info["patches"]], False),
+        ("Warnungen beim Build", warnings, False),
     ]
 
-    def section(title, items):
+    lines = [intro]
+    for title, items, _ in sections:
         if items:
             lines.extend(["", f"### {title}"] + [f"- {item}" for item in items])
-
-    section("Zusätzliche Mods und Packs", [
-        mod["name"] + (" (nur Client)" if mod["side"] == "client" else "") for mod in info["overlay_mods"]
-    ])
-    section("Ersetzt", [f"`{old}` durch `{new}`" for old, new in info["replaced"]])
-    section("Aus Craftoria entfernt", [f"`{rel}`" for rel in info["removed"]])
-    section("Eigene Dateien", [f"`{rel}`" for rel in info["overlay_files"]])
-    section("Patches", [f"`{name}`" for name in info["patches"]])
-    section("Warnungen beim Build", warnings)
     write_text(DIST / "release-notes.md", "\n".join(lines) + "\n")
+
+    # Fett statt ###, das sieht in Discord-Embeds überall gleich aus
+    discord = [
+        intro,
+        f"**Download:** [Client]({download_url}/{client_zip.name}) · [Server]({download_url}/{server_zip.name})",
+    ]
+    for title, items, public in sections:
+        if public and items:
+            discord.extend(["", f"**{title}**"] + [f"- {item}" for item in items])
+    description = "\n".join(discord)
+    if len(description) > DISCORD_DESCRIPTION_LIMIT:
+        description = description[:DISCORD_DESCRIPTION_LIMIT].rsplit("\n", 1)[0] + f"\n… [alles im Release]({release_url})"
+    save_json(BUILD / "discord-payload.json", {
+        "username": cfg["name"],
+        # Commit-Betreffs sollen niemanden pingen
+        "allowed_mentions": {"parse": []},
+        "embeds": [{
+            "title": f"{cfg['name']} {version}",
+            "url": release_url,
+            "description": description,
+            "color": 0x6AA84F,
+        }],
+    })
 
 
 # --- Befehle ---------------------------------------------------------------------------------
@@ -462,7 +559,7 @@ def cmd_build(args):
         fail("packwiz hat keine Client-ZIP erzeugt")
 
     server_zip = build_server(cfg, version, client_zip, info)
-    write_release_notes(lock, info, client_zip, server_zip)
+    write_release_notes(cfg, lock, version, info, client_zip, server_zip)
 
     set_output("name", cfg["name"])
     set_output("version", version)
@@ -575,6 +672,30 @@ def cmd_check_upstream(args):
     log(f"Neues Craftoria-Release: {version} ({release[:7]})")
 
 
+def cmd_notify_discord(args):
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    if not webhook:
+        log("DISCORD_WEBHOOK_URL ist nicht gesetzt, keine Discord-Nachricht")
+        return
+    payload = BUILD / "discord-payload.json"
+    if not payload.exists():
+        fail("build/discord-payload.json fehlt, vorher build ausführen")
+
+    request = urllib.request.Request(
+        webhook + ("&" if "?" in webhook else "?") + "wait=true",
+        data=payload.read_bytes(),
+        headers={"Content-Type": "application/json", "User-Agent": "cozytoria-build"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(request, timeout=30).close()
+    except urllib.error.HTTPError as error:
+        fail(f"Discord hat mit HTTP {error.code} geantwortet: {error.read().decode('utf-8', 'replace')[:500]}")
+    except urllib.error.URLError as error:
+        fail(f"Discord ist nicht erreichbar: {error.reason}")
+    log("Release im Discord angekündigt")
+
+
 def main():
     # packwiz-Argumente unverändert durchreichen, argparse würde sich an deren Flags verschlucken
     if len(sys.argv) > 1 and sys.argv[1] == "packwiz":
@@ -590,9 +711,15 @@ def main():
     commands.add_parser("assemble", help="nur das kombinierte Pack in build/pack erzeugen")
     commands.add_parser("packwiz", help="packwiz auf dem kombinierten Pack ausführen")
     commands.add_parser("check-upstream", help="nach neuem Craftoria-Release suchen")
+    commands.add_parser("notify-discord", help="zuletzt gebautes Release im Discord ankündigen")
     args = parser.parse_args()
 
-    handlers = {"build": cmd_build, "assemble": cmd_assemble, "check-upstream": cmd_check_upstream}
+    handlers = {
+        "build": cmd_build,
+        "assemble": cmd_assemble,
+        "check-upstream": cmd_check_upstream,
+        "notify-discord": cmd_notify_discord,
+    }
     run_guarded(handlers[args.command], args)
 
 

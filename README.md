@@ -94,6 +94,10 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
   z. B. `1.37.0-cozy.1`, `1.37.0-cozy.2`, nach einem Craftoria-Update wieder ab `1.38.0-cozy.1`.
 - **Pull Requests und andere Branches** bauen nur, die ZIPs hängen als Artefakt am Workflow-Run.
 - Größere Änderungen also auf einem Branch machen, per PR mergen, fertig.
+- Die Release-Notes enthalten einen Changelog seit dem letzten Release: Craftoria-Update, neue, aktualisierte und
+  entfernte Mods sowie die Commit-Betreffs. Gute Commit-Messages landen also direkt bei den Spielern.
+- Jedes Release wird zusätzlich im Discord angekündigt, mit Changelog, allen zusätzlichen Mods und Download-Links
+  (siehe Einrichtung).
 
 ## Craftoria-Updates
 
@@ -108,6 +112,10 @@ automatisch. Manuell auslösen geht unter Actions → Craftoria upstream → Run
 - **Settings → Actions → General → Workflow permissions:** „Read and write permissions“ und
   „Allow GitHub Actions to create and approve pull requests“ aktivieren. Bei einer Organisation muss das
   zusätzlich in den Organisations-Einstellungen erlaubt sein.
+- **Discord:** Webhook-URL als Secret `DISCORD_WEBHOOK_URL` hinterlegen (Settings → Secrets and variables →
+  Actions → New repository secret, oder `gh secret set DISCORD_WEBHOOK_URL -R CozyOrg/cozytoria` und URL einfügen).
+  Die URL gehört nicht ins Repo: Wer sie kennt, kann in euren Kanal schreiben. Ohne Secret wird die Ankündigung
+  übersprungen.
 - **Sichtbarkeit:** Der ServerStarter lädt die Client-ZIP ohne Login aus dem Release, das Repo muss dafür
   **öffentlich** sein. Bei einem privaten Repo in `cozytoria.json` `"modpackSource": "bundled"` setzen: Dann liegt
   die Client-ZIP in der Server-ZIP und wird per `file://` gelesen (Server-ZIP wird dadurch ~65 MB groß).

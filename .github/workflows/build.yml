@@ -58,3 +58,9 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "$NAME $VERSION" \
             --notes-file dist/release-notes.md
+
+      - name: Announce release on Discord
+        if: env.IS_RELEASE == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python3 scripts/cozytoria.py notify-discord
