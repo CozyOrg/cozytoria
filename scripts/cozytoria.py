@@ -25,6 +25,7 @@ import tarfile
 import urllib.error
 import urllib.request
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +51,8 @@ UPSTREAM_SERVER_CONFIG = "server_files/" + SERVER_CONFIG
 IGNORED_OVERLAY_FILES = (".gitkeep", ".DS_Store")
 # Discord erlaubt 4096 Zeichen pro Embed, der Rest bleibt für den Hinweis aufs vollständige Release
 DISCORD_DESCRIPTION_LIMIT = 3900
+# Conventional-Commit-Typen, die Spieler nicht interessieren und im Discord ausgeblendet werden
+TECHNICAL_COMMIT_TYPES = {"build", "chore", "ci", "docs", "refactor", "style", "test"}
 
 IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 warnings = []
@@ -482,6 +485,17 @@ def changelog(cfg, lock, info):
     return previous, changes, commits
 
 
+def player_facing(subject):
+    # "feat(quests): neue Kapitel" wird zu "Neue Kapitel", technische Commits fallen ganz raus
+    match = re.match(r"^(\w+)(\([^)]*\))?!?:\s*(.+)$", subject)
+    if not match:
+        return subject
+    if match.group(1).lower() in TECHNICAL_COMMIT_TYPES:
+        return None
+    text = match.group(3)
+    return text[0].upper() + text[1:]
+
+
 def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     repo, commit = lock["repo"], lock["commit"]
     release_url = f"https://github.com/{github_repo(cfg)}/releases/tag/{version}"
@@ -493,61 +507,67 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     )
     previous, changes, commits = changelog(cfg, lock, info)
 
-    # (Titel, Einträge, auch im Discord zeigen)
+    added_mods = [mod["name"] + (" (nur Client)" if mod["side"] == "client" else "") for mod in info["overlay_mods"]]
+    removed = [entry["name"] for entry in info["removed"]]
+
     sections = [
         ("Downloads", [
             f"`{client_zip.name}`: Client, in Prism Launcher unter Instanz hinzufügen → Importieren",
             f"`{server_zip.name}`: Server, entpacken und `startserver.sh` bzw. `startserver.bat` starten",
-        ], False),
-        (f"Änderungen seit {previous}", changes, True),
-        (f"Commits seit {previous}", [f"`{subject}`" for subject in commits], True),
-        ("Zusätzliche Mods und Packs", [
-            mod["name"] + (" (nur Client)" if mod["side"] == "client" else "") for mod in info["overlay_mods"]
-        ], True),
-        ("Ersetzt", [f"`{old}` durch `{new}`" for old, new in info["replaced"]], False),
-        ("Aus Craftoria entfernt", [entry["name"] for entry in info["removed"]], True),
-        ("Eigene Dateien", [f"`{rel}`" for rel in info["overlay_files"]], False),
-        ("Patches", [f"`{name}`" for name in info["patches"]], False),
-        ("Warnungen beim Build", warnings, False),
+        ]),
+        (f"Änderungen seit {previous}", changes),
+        (f"Commits seit {previous}", [f"`{subject}`" for subject in commits]),
+        ("Zusätzliche Mods und Packs", added_mods),
+        ("Ersetzt", [f"`{old}` durch `{new}`" for old, new in info["replaced"]]),
+        ("Aus Craftoria entfernt", removed),
+        ("Eigene Dateien", [f"`{rel}`" for rel in info["overlay_files"]]),
+        ("Patches", [f"`{name}`" for name in info["patches"]]),
+        ("Warnungen beim Build", warnings),
     ]
 
     lines = [intro]
-    for title, items, _ in sections:
+    for title, items in sections:
         if items:
             lines.extend(["", f"### {title}"] + [f"- {item}" for item in items])
     write_text(DIST / "release-notes.md", "\n".join(lines) + "\n")
 
-    # Download groß in die Nachricht selbst, dort rendern Überschriften sicher. <...> unterdrückt Link-Vorschauen.
-    content = [
-        cfg.get("discord", {}).get("mention", ""),
-        f"## 🎉 {cfg['name']} {version} ist da!",
-        f"### ⬇️ [Download für Prism Launcher](<{download_url}/{client_zip.name}>)",
-        "**Installieren:** Prism Launcher → **Instanz hinzufügen** → **Importieren** → ZIP auswählen "
-        "oder den Download-Link einfügen → **OK**",
-        "**Updaten:** neue Version genauso importieren. Deine Einstellungen kannst du aus der alten Instanz "
-        "übernehmen (`options.txt` in deren `minecraft`-Ordner), danach die alte Instanz löschen.",
+    # Discord: alles in einem Embed, nur der Ping steht im content (Erwähnungen in Embeds pingen nie).
+    # Fett statt Überschriften und Mods in einer Zeile, damit die Nachricht ruhig und kompakt bleibt.
+    news = changes + [text for text in map(player_facing, commits) if text]
+    discord = [
+        f"**[⬇️ Download für Prism Launcher]({download_url}/{client_zip.name})**",
+        f"Basiert auf Craftoria {lock['version']} · "
+        f"[Craftoria-Changelog](https://github.com/{repo}/blob/{commit}/changelogs/CHANGELOG.md)",
     ]
-
-    # Im Embed fett statt ###, das sieht überall gleich aus
-    discord = [intro]
-    for title, items, public in sections:
-        if public and items:
-            discord.extend(["", f"**{title}**"] + [f"- {item}" for item in items])
+    if news:
+        discord += ["", "**Was ist neu**"] + [f"- {item}" for item in news]
+    if added_mods:
+        discord += ["", "**Zusätzliche Mods**", " · ".join(added_mods)]
+    if removed:
+        discord += ["", "**Aus Craftoria entfernt**", " · ".join(removed)]
     description = "\n".join(discord)
     if len(description) > DISCORD_DESCRIPTION_LIMIT:
         description = description[:DISCORD_DESCRIPTION_LIMIT].rsplit("\n", 1)[0] + f"\n… [alles im Release]({release_url})"
-    save_json(BUILD / "discord-payload.json", {
+
+    payload = {
         "username": cfg["name"],
-        "content": "\n".join(line for line in content if line),
-        # Erwähnungen in Embeds (z. B. in Commit-Betreffs) pingen nie, nur die aus cozytoria.json im content
         "allowed_mentions": {"parse": ["everyone", "roles"]},
         "embeds": [{
-            "title": f"{cfg['name']} {version}",
+            "title": f"🎉 {cfg['name']} {version} ist da!",
             "url": release_url,
             "description": description,
             "color": 0x6AA84F,
+            "footer": {
+                "text": "Installieren: Prism Launcher → Instanz hinzufügen → Importieren → ZIP oder Download-Link · "
+                        "Updaten: neue Version genauso importieren, options.txt aus der alten Instanz übernehmen",
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }],
-    })
+    }
+    mention = cfg.get("discord", {}).get("mention", "")
+    if mention:
+        payload["content"] = mention
+    save_json(BUILD / "discord-payload.json", payload)
 
 
 # --- Befehle ---------------------------------------------------------------------------------

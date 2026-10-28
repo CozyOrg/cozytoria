@@ -104,7 +104,9 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
   entfernte Mods sowie die Commit-Betreffs. Gute Commit-Messages landen also direkt bei den Spielern.
 - Jedes Release wird zusätzlich im Discord angekündigt: Ping, großer Download-Link, Changelog und alle zusätzlichen
   Mods (siehe Einrichtung). Wer gepingt wird, steht in `cozytoria.json` unter `discord.mention`: `@everyone`,
-  eine Rolle als `<@&ROLLEN-ID>` oder leer für keinen Ping.
+  eine Rolle als `<@&ROLLEN-ID>` oder leer für keinen Ping. Unter „Was ist neu“ stehen dort nur Commits, die Spieler
+  betreffen: `feat: Mehr Quests` wird zu „Mehr Quests“, `ci:`, `docs:`, `chore:`, `refactor:`, `style:`, `test:`
+  und `build:` werden ausgeblendet.
 
 ## Craftoria-Updates
 
