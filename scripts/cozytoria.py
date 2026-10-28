@@ -19,6 +19,7 @@ import os
 import platform
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -112,12 +113,21 @@ def save_json(path, data):
     write_text(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
+def ssl_context():
+    # Wie ssl.create_default_context(), aber ohne SSLKEYLOGFILE. Zeigt die Variable auf eine Datei, die
+    # Python nicht öffnen darf (kommt auf manchen Windows-PCs vor), scheitert sonst jeder Download.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_default_certs()
+    return context
+
+
 def http_get(url):
     headers = {"User-Agent": "cozytoria-build"}
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token and url.startswith("https://api.github.com/"):
         headers["Authorization"] = f"Bearer {token}"
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120) as response:
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
         return response.read()
 
 
@@ -717,7 +727,7 @@ def cmd_notify_discord(args):
         method="POST",
     )
     try:
-        urllib.request.urlopen(request, timeout=30).close()
+        urllib.request.urlopen(request, timeout=30, context=ssl_context()).close()
     except urllib.error.HTTPError as error:
         fail(f"Discord hat mit HTTP {error.code} geantwortet: {error.read().decode('utf-8', 'replace')[:500]}")
     except urllib.error.URLError as error:
