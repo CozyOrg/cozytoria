@@ -1,0 +1,16 @@
+diff --git a/config/entityculling.json b/config/entityculling.json
+index 2688f11..a30dab0 100644
+--- a/config/entityculling.json
++++ b/config/entityculling.json
+@@ -13,7 +13,10 @@
+   "entityWhitelist": [
+     "botania:mana_burst",
+     "drg_flares:drg_flares",
+-    "quark:soul_bead"
++    "quark:soul_bead",
++    "mts:builder_existing",
++    "mts:builder_rendering",
++    "mts:builder_seat"
+   ],
+   "tracingDistance": 128,
+   "debugMode": false,
