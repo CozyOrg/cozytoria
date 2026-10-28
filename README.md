@@ -60,6 +60,9 @@ python3 scripts/cozytoria.py packwiz update <mod>
 ```
 
 - Neue oder aktualisierte `.pw.toml` landen in `overlay/`, entfernte Craftoria-Mods in `remove.txt`.
+- Holt packwiz eine Mod, die Craftoria schon mitbringt, noch einmal (z. B. eine Abhängigkeit von Modrinth statt
+  CurseForge), übernimmt der Helfer sie nicht ins Overlay und warnt. Sonst würde sie Craftorias Version festhalten.
+  Liegt so eine Datei trotzdem im Overlay, warnt auch der Build.
 - **Client-only Mods:** in der `.pw.toml` `side = "client"` setzen. Der Build trägt sie dann automatisch in
   `ignoreProject` (CurseForge) bzw. `ignoreFiles` (andere Quellen) der Server-Config ein.
 - `side = "server"` funktioniert nicht: Der Server installiert aus der Client-ZIP, und dort fehlt die Mod dann.

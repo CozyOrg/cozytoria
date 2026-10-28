@@ -327,6 +327,17 @@ def apply_overlay():
     return copied, overridden
 
 
+def craftoria_jars(removed):
+    # Jar-Dateiname -> Metadaten-Pfad aller Mods, die Craftoria mitbringt und die nicht per remove.txt raus sind
+    removed_paths = {entry["path"] for entry in removed}
+    jars = {}
+    for path in metadata_files(UPSTREAM_DIR):
+        rel = path.relative_to(UPSTREAM_DIR).as_posix()
+        if rel not in removed_paths:
+            jars[read_metadata(path)["filename"]] = rel
+    return jars
+
+
 def drop_replaced_upstream(overlay_meta):
     # Bringt das Overlay eine Mod mit, die Craftoria schon hat, gewinnt die Overlay-Version
     claimed = {}
@@ -390,6 +401,11 @@ def assemble(cfg, lock, version):
     patches = apply_patches(lock)
     copied, overridden = apply_overlay()
     overlay_meta = [rel for rel in copied if rel.endswith(".pw.toml") and rel.split("/", 1)[0] in METADATA_DIRS]
+    jars = craftoria_jars(removed)
+    for rel in overlay_meta:
+        jar = read_metadata(PACK_DIR / rel)["filename"]
+        if jar in jars:
+            warn(f"overlay/{rel} enthält dasselbe Jar wie Craftoria ({jar}) und hält dessen Version fest, besser löschen")
     replaced = drop_replaced_upstream(overlay_meta)
     stamp_version(cfg, version)
 
@@ -645,18 +661,29 @@ def snapshot_metadata():
 
 def cmd_packwiz(packwiz_args):
     cfg, lock = load_json(CONFIG_FILE), load_json(LOCK_FILE)
-    assemble(cfg, lock, dev_version(cfg, lock))
+    info = assemble(cfg, lock, dev_version(cfg, lock))
+    jars = craftoria_jars(info["removed"])
 
     before = snapshot_metadata()
     packwiz(packwiz_args, interactive=True)
     after = snapshot_metadata()
 
     for rel in sorted(after):
-        if before.get(rel) != after[rel]:
-            dest = OVERLAY_DIR / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(PACK_DIR / rel, dest)
-            log(f"overlay/{rel} geschrieben")
+        if before.get(rel) == after[rel]:
+            continue
+        dest = OVERLAY_DIR / rel
+        jar = read_metadata(PACK_DIR / rel)["filename"]
+        if jar in jars:
+            # Dasselbe Jar wie in Craftoria, meist eine Abhängigkeit, die packwiz von der anderen Plattform neu
+            # geholt hat. Im Overlay würde sie Craftorias Version dauerhaft festnageln.
+            if dest.exists():
+                dest.unlink()
+                log(f"overlay/{rel} gelöscht")
+            warn(f"{rel} nicht ins Overlay übernommen: {jar} kommt schon aus Craftoria ({jars[jar]})")
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PACK_DIR / rel, dest)
+        log(f"overlay/{rel} geschrieben")
 
     removals = []
     for rel in sorted(set(before) - set(after)):
