@@ -1,0 +1,13 @@
+name = "Immersive Vehicles (MTS)"
+filename = "Immersive Vehicles-1.21.1-24.0.0.jar"
+side = "both"
+
+[download]
+hash-format = "sha1"
+hash = "7050a332f18d390610029de28c13fb6139786607"
+mode = "metadata:curseforge"
+
+[update]
+[update.curseforge]
+file-id = 7926606
+project-id = 286703
