@@ -57,6 +57,7 @@ TECHNICAL_COMMIT_TYPES = {"build", "chore", "ci", "docs", "refactor", "style", "
 
 IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 warnings = []
+curl_fallback_logged = False
 
 
 def log(message):
@@ -80,11 +81,13 @@ def set_output(key, value):
             f.write(f"{key}={value}\n")
 
 
-def run(cmd, cwd=None, env=None, capture=False):
+def run(cmd, cwd=None, env=None, capture=False, capture_bytes=False):
     result = subprocess.run(
-        [str(c) for c in cmd], cwd=cwd, env=env, check=True, text=True,
-        stdout=subprocess.PIPE if capture else None,
+        [str(c) for c in cmd], cwd=cwd, env=env, check=True, text=not capture_bytes,
+        stdout=subprocess.PIPE if capture or capture_bytes else None,
     )
+    if capture_bytes:
+        return result.stdout
     return result.stdout.strip() if capture else None
 
 
@@ -121,14 +124,36 @@ def ssl_context():
     return context
 
 
+def system_curl():
+    # Das curl des Betriebssystems vertraut denselben Zertifikaten wie der Browser (unter Windows über Schannel)
+    if platform.system() == "Windows":
+        path = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "curl.exe"
+        return str(path) if path.exists() else None
+    return shutil.which("curl")
+
+
 def http_get(url):
     headers = {"User-Agent": "cozytoria-build"}
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token and url.startswith("https://api.github.com/"):
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
-        return response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=120, context=ssl_context()) as response:
+            return response.read()
+    except urllib.error.URLError as error:
+        curl = system_curl()
+        if not isinstance(error.reason, ssl.SSLCertVerificationError) or not curl:
+            raise
+
+    # Python kennt die Zertifizierungsstelle nicht, z. B. bei msys2-Python oder einem Virenscanner mit
+    # HTTPS-Prüfung. curl prüft das Zertifikat weiterhin, nur gegen den Zertifikatsspeicher des Systems.
+    global curl_fallback_logged
+    if not curl_fallback_logged:
+        log("Python vertraut dem Zertifikat nicht, lade mit dem curl des Systems")
+        curl_fallback_logged = True
+    return run([curl, "--fail", "--silent", "--show-error", "--location", "--max-time", "300",
+                "--user-agent", headers["User-Agent"], url], capture_bytes=True)
 
 
 def github_repo(cfg):
@@ -767,6 +792,8 @@ def run_guarded(handler, args):
         handler(args)
     except subprocess.CalledProcessError as error:
         fail(f"Befehl fehlgeschlagen ({error.returncode}): {' '.join(map(str, error.cmd))}")
+    except urllib.error.URLError as error:
+        fail(f"Download fehlgeschlagen: {error.reason}")
 
 
 if __name__ == "__main__":
