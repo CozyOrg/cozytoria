@@ -6,11 +6,17 @@ darüber, und GitHub Actions baut daraus Client- und Server-ZIP.
 
 ## Für Spieler
 
-1. Neueste `Cozytoria-<version>.zip` unter [Releases](https://github.com/CozyOrg/cozytoria/releases) herunterladen.
-2. CurseForge App → Minecraft → **Create Custom Profile** → **Import** → ZIP auswählen.
-3. Update: neue ZIP genauso importieren. Wer seine Einstellungen behalten will, kopiert `options.txt` aus dem alten Profilordner rüber.
+Wir spielen mit [Prism Launcher](https://prismlauncher.org/).
 
-Die ZIP ist ein normaler CurseForge-Export, Prism Launcher oder ATLauncher können sie auch importieren.
+1. **Installieren:** Prism Launcher → **Instanz hinzufügen** → **Importieren** → die neueste `Cozytoria-<version>.zip`
+   aus den [Releases](https://github.com/CozyOrg/cozytoria/releases) auswählen oder deren Download-Link einfügen → **OK**.
+2. **Updaten:** die neue Version genauso importieren. Eigene Einstellungen aus der alten Instanz übernehmen
+   (`options.txt` in deren `minecraft`-Ordner), danach die alte Instanz löschen.
+
+Fragt Prism beim Import nach manuellen Downloads (manche Mods sperren Downloads über Launcher): die angezeigten Links
+im Browser öffnen und herunterladen, Prism findet die Dateien im Downloads-Ordner von selbst.
+
+Die ZIP ist ein normaler CurseForge-Export und lässt sich auch in der CurseForge App importieren.
 
 ## Für den Server
 

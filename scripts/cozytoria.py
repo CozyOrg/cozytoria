@@ -496,7 +496,7 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     # (Titel, Einträge, auch im Discord zeigen)
     sections = [
         ("Downloads", [
-            f"`{client_zip.name}`: Client, in der CurseForge App importieren",
+            f"`{client_zip.name}`: Client, in Prism Launcher unter Instanz hinzufügen → Importieren",
             f"`{server_zip.name}`: Server, entpacken und `startserver.sh` bzw. `startserver.bat` starten",
         ], False),
         (f"Änderungen seit {previous}", changes, True),
@@ -521,9 +521,11 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     content = [
         cfg.get("discord", {}).get("mention", ""),
         f"## 🎉 {cfg['name']} {version} ist da!",
-        f"### ⬇️ [Client herunterladen](<{download_url}/{client_zip.name}>)",
-        "Installieren und Updaten: CurseForge App → **Create Custom Profile** → **Import** → ZIP auswählen",
-        f"🖥️ Server: [{server_zip.name}](<{download_url}/{server_zip.name}>)",
+        f"### ⬇️ [Download für Prism Launcher](<{download_url}/{client_zip.name}>)",
+        "**Installieren:** Prism Launcher → **Instanz hinzufügen** → **Importieren** → ZIP auswählen "
+        "oder den Download-Link einfügen → **OK**",
+        "**Updaten:** neue Version genauso importieren. Deine Einstellungen kannst du aus der alten Instanz "
+        "übernehmen (`options.txt` in deren `minecraft`-Ordner), danach die alte Instanz löschen.",
     ]
 
     # Im Embed fett statt ###, das sieht überall gleich aus
