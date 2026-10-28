@@ -1,0 +1,13 @@
+name = "CCCCC"
+filename = "ccccc-neoforge-1.1.0.jar"
+side = "both"
+
+[download]
+url = "https://cdn.modrinth.com/data/B1tdnJ0n/versions/lUK2iSBD/ccccc-neoforge-1.1.0.jar"
+hash-format = "sha512"
+hash = "39fd8aea42a9a1336937c76d144960e558023c20732c9f2236dc981074c2dbdbbcd4049be5006d2629bd5de2b8df12a5013857339288c453472e5ff4cd1c895e"
+
+[update]
+[update.modrinth]
+mod-id = "B1tdnJ0n"
+version = "lUK2iSBD"
