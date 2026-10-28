@@ -7,6 +7,7 @@
                       Metadaten landen in overlay/, entfernte Craftoria-Mods in remove.txt
   check-upstream      Nach einem neuen Craftoria-Release suchen und upstream.json anpassen
   notify-discord      Das zuletzt gebaute Release im Discord ankündigen (Webhook aus DISCORD_WEBHOOK_URL)
+  test-server         Server aus dist/ installieren, starten und wieder stoppen (braucht bash und Java 21)
 
 Braucht nur Python 3.9+ und git, packwiz wird automatisch heruntergeladen.
 """
@@ -17,12 +18,16 @@ import io
 import json
 import os
 import platform
+import queue
 import re
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
 import tarfile
+import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -35,6 +40,7 @@ DIST = ROOT / "dist"
 UPSTREAM_DIR = BUILD / "upstream"
 PACK_DIR = BUILD / "pack"
 SERVER_DIR = BUILD / "server"
+TEST_SERVER_DIR = BUILD / "test-server"
 OVERLAY_DIR = ROOT / "overlay"
 PATCHES_DIR = ROOT / "patches"
 REMOVE_FILE = ROOT / "remove.txt"
@@ -54,6 +60,8 @@ IGNORED_OVERLAY_FILES = (".gitkeep", ".DS_Store")
 DISCORD_DESCRIPTION_LIMIT = 3900
 # Conventional-Commit-Typen, die Spieler nicht interessieren und im Discord ausgeblendet werden
 TECHNICAL_COMMIT_TYPES = {"build", "chore", "ci", "docs", "refactor", "style", "test"}
+# Diese Zeile schreibt der Minecraft-Server, sobald er komplett gestartet ist
+SERVER_DONE_PATTERN = re.compile(r"Done \(\d+[.,]\d+s\)! For help")
 
 IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 warnings = []
@@ -701,6 +709,87 @@ def cmd_packwiz(packwiz_args):
             log(f"{rel} in remove.txt eingetragen")
 
 
+def print_crash_report():
+    reports = sorted((TEST_SERVER_DIR / "crash-reports").glob("*.txt"), key=lambda path: path.stat().st_mtime)
+    if reports:
+        log(f"--- Anfang von crash-reports/{reports[-1].name} ---")
+        log("\n".join(read_text(reports[-1]).splitlines()[:80]))
+
+
+def cmd_test_server(args):
+    if os.name == "nt":
+        fail("Der Servertest läuft nur unter Linux und macOS")
+    if not shutil.which("bash") or not shutil.which("java"):
+        fail("Der Servertest braucht bash und Java 21 im PATH")
+    cfg = load_json(CONFIG_FILE)
+    server_zips = sorted(DIST.glob(f"{cfg['name']}-Server-*.zip"))
+    client_zips = sorted(set(DIST.glob(f"{cfg['name']}-*.zip")) - set(server_zips))
+    if len(server_zips) != 1 or len(client_zips) != 1:
+        fail("dist/ braucht genau eine Client- und eine Server-ZIP, vorher build ausführen")
+    client_zip = client_zips[0]
+
+    if TEST_SERVER_DIR.exists():
+        shutil.rmtree(TEST_SERVER_DIR)
+    TEST_SERVER_DIR.mkdir(parents=True)
+    with zipfile.ZipFile(server_zips[0]) as zf:
+        zf.extractall(TEST_SERVER_DIR)
+    # Die lokale Client-ZIP statt des Release-Downloads, so lassen sich auch unveröffentlichte Builds testen
+    shutil.copy2(client_zip, TEST_SERVER_DIR / client_zip.name)
+    config = TEST_SERVER_DIR / SERVER_CONFIG
+    write_text(config, yaml_set(read_text(config), "modpackUrl", f"file://{client_zip.name}"))
+    # Der ServerStarter erwartet die Zustimmung in der dritten Zeile
+    write_text(TEST_SERVER_DIR / "eula.txt", "#Servertest von Cozytoria\n#\neula=true\n")
+
+    log(f"Starte Testserver mit {client_zip.name} (Zeitlimit {args.timeout} Minuten)")
+    # Eigene Prozessgruppe, damit bei einem Timeout auch der eigentliche Minecraft-Prozess beendet wird
+    process = subprocess.Popen(
+        ["bash", "startserver.sh"], cwd=TEST_SERVER_DIR, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, errors="replace", start_new_session=True,
+    )
+    lines = queue.Queue()
+
+    def pump():
+        for line in process.stdout:
+            lines.put(line)
+        lines.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+
+    started = False
+    deadline = time.monotonic() + args.timeout * 60
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            os.killpg(process.pid, signal.SIGKILL)
+            if started:
+                warn("Server hat sich nach stop nicht innerhalb von 5 Minuten beendet und wurde abgeschossen")
+                break
+            print_crash_report()
+            fail(f"Server war nach {args.timeout} Minuten noch nicht gestartet")
+        try:
+            line = lines.get(timeout=min(remaining, 5))
+        except queue.Empty:
+            continue
+        if line is None:
+            break
+        print(line, end="", flush=True)
+        if not started and SERVER_DONE_PATTERN.search(line):
+            started = True
+            deadline = time.monotonic() + 5 * 60
+            log("Server ist gestartet, schicke stop")
+            try:
+                process.stdin.write("stop\n")
+                process.stdin.flush()
+            except BrokenPipeError:
+                pass
+
+    process.wait()
+    if not started:
+        print_crash_report()
+        fail("Server hat sich beendet, bevor er fertig gestartet war")
+    log("Servertest bestanden")
+
+
 def modpack_url_of(config_text):
     match = re.search(r"^\s*modpackUrl:\s*(\S+)", config_text, re.M)
     return match.group(1) if match else None
@@ -803,6 +892,8 @@ def main():
     commands.add_parser("packwiz", help="packwiz auf dem kombinierten Pack ausführen")
     commands.add_parser("check-upstream", help="nach neuem Craftoria-Release suchen")
     commands.add_parser("notify-discord", help="zuletzt gebautes Release im Discord ankündigen")
+    test_server = commands.add_parser("test-server", help="Server aus dist/ installieren, starten und stoppen")
+    test_server.add_argument("--timeout", type=float, default=40, help="Minuten bis zum fertigen Start (Standard 40)")
     args = parser.parse_args()
 
     handlers = {
@@ -810,6 +901,7 @@ def main():
         "assemble": cmd_assemble,
         "check-upstream": cmd_check_upstream,
         "notify-discord": cmd_notify_discord,
+        "test-server": cmd_test_server,
     }
     run_guarded(handlers[args.command], args)
 

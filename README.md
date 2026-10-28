@@ -111,6 +111,23 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
   betreffen: `feat: Mehr Quests` wird zu „Mehr Quests“, `ci:`, `docs:`, `chore:`, `refactor:`, `style:`, `test:`
   und `build:` werden ausgeblendet.
 
+## Servertest
+
+Jeder Build-Lauf auf GitHub (Push, PR und Release) installiert den Server einmal mit dem ServerStarter, so wie er
+auch bei euch läuft, und startet ihn. Sobald „Done“ erscheint, wird er wieder gestoppt. Stürzt er ab oder ist er
+nach 40 Minuten nicht oben, wird der Lauf rot. Logs und Crash-Reports hängen dann als Artefakt `server-test-logs` am
+Run, und es entsteht kein Release.
+
+Der Test prüft nur die Serverseite. Abstürze, die nur im Client auftreten (Grafik, Shader, Client-only Mods),
+findet er nicht.
+
+Lokal (Linux oder macOS, Java 21, etwa 8 GB freier RAM, lädt alle Mods herunter):
+
+```bash
+python3 scripts/cozytoria.py build
+python3 scripts/cozytoria.py test-server
+```
+
 ## Craftoria-Updates
 
 Der Workflow **Craftoria upstream** schaut jeden Morgen nach. Craftoria hat keine GitHub-Releases; als Release gilt

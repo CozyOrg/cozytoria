@@ -2,6 +2,7 @@ name: Build
 
 # Releases nur per Hand: Actions → Build → Run workflow auf main.
 # Pushes, PRs und Läufe auf anderen Branches bauen nur und hängen die ZIPs als Artefakt an.
+# Jeder Lauf startet den Server einmal zur Probe, ein Release gibt es nur, wenn er dabei hochkommt.
 on:
   push:
     branches: [main]
@@ -15,11 +16,13 @@ permissions:
 
 concurrency:
   group: build-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Der Servertest dauert, überholte Push- und PR-Läufe werden daher abgebrochen, Releases nie
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       IS_RELEASE: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
     steps:
@@ -47,6 +50,26 @@ jobs:
         with:
           name: ${{ steps.build.outputs.name }}-${{ steps.build.outputs.version }}
           path: dist/
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Test server start
+        run: python3 scripts/cozytoria.py test-server
+
+      - name: Upload server logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-test-logs
+          path: |
+            build/test-server/logs/
+            build/test-server/crash-reports/
+            build/test-server/installer.jar.log
+          if-no-files-found: ignore
 
       - name: Create GitHub release
         if: env.IS_RELEASE == 'true'
