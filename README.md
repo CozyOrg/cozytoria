@@ -10,7 +10,8 @@ Wir spielen mit [Prism Launcher](https://prismlauncher.org/).
 
 1. **Installieren:** Prism Launcher → **Instanz hinzufügen** → **Importieren** → die neueste `Cozytoria-<version>.zip`
    aus den [Releases](https://github.com/CozyOrg/cozytoria/releases) auswählen oder deren Download-Link einfügen → **OK**.
-2. **Updaten:** die neue Version genauso importieren. Eigene Einstellungen aus der alten Instanz übernehmen
+2. **Updaten:** Gibt es ein neues Release, erscheint im Hauptmenü oben links ein **Update**-Button, der zur
+   Release-Seite führt. Die neue Version genauso importieren. Eigene Einstellungen aus der alten Instanz übernehmen
    (`options.txt` in deren `minecraft`-Ordner), danach die alte Instanz löschen.
 
 Fragt Prism beim Import nach manuellen Downloads (manche Mods sperren Downloads über Launcher): die angezeigten Links

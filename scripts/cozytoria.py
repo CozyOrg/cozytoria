@@ -449,6 +449,21 @@ def stamp_version(cfg, version):
     fancymenu = PACK_DIR / "config" / "fancymenu" / "customization" / "craftoria.txt"
     replace_in_file(fancymenu, r"^(\s*source\s*=\s*)[^%\r\n]*(?=%n%)", f"{cfg['name']} - {version}")
 
+    # Update-Button im Hauptmenü: Craftoria vergleicht die lokale version_info.json mit der aus seinem Repo, wir mit
+    # unserem neuesten Release. Die API antwortet direkt, FancyMenu folgt keinen Weiterleitungen, ein Release-Asset
+    # unter releases/latest/download/ ginge also nicht. tag_name ist die Version, html_url die Release-Seite.
+    if fancymenu.exists():
+        latest = f"https://api.github.com/repos/{github_repo(cfg)}/releases/latest"
+        fields = {"version": "tag_name", "version_url": "html_url"}
+        text, count = re.subn(
+            r'"source":"https://raw\.githubusercontent\.com/[^"]*/version_info\.json","json_path":"\$\.(version_url|version)"',
+            lambda m: f'"source":"{latest}","json_path":"$.{fields[m.group(1)]}"',
+            read_text(fancymenu),
+        )
+        if count == 0 or "/version_info.json" in text.replace('"short_path":"version_info.json"', ""):
+            warn("Update-Button im Hauptmenü nicht (vollständig) auf unsere Releases umgestellt, Craftoria hat ihn geändert")
+        write_text(fancymenu, text)
+
 
 def assemble(cfg, lock, version):
     fetch_upstream(lock)
