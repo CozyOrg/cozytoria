@@ -4,3 +4,4 @@
 #   kubejs/server_scripts/irgendwas/*.js
 # Wird automatisch ergänzt, wenn du `python3 scripts/cozytoria.py packwiz remove <mod>` nutzt.
 mods/desired-servers.pw.toml
+mods/simple-backups.pw.toml
