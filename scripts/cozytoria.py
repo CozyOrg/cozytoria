@@ -80,6 +80,7 @@ CURSEFORGE_CDN = "https://mediafilez.forgecdn.net/files"
 # Offizielles Image mit vorinstallierten Signaturen, die Debian-Variante gibt es auch für arm64
 CLAMAV_IMAGE = "clamav/clamav:1.5-debian"
 CLAMAV_FRESHCLAM_FAILED = "freshclam fehlgeschlagen"
+CLAMAV_LOG_PREFIX = "clamd-log: "
 # Im Image läuft der Daemon statt clamscan: Er lädt die Signaturen einmal und scannt mit einem Thread pro Kern,
 # clamscan allein bräuchte für alle Mods weit über eine halbe Stunde. Die Signaturen im Image sind ein paar Tage alt,
 # freshclam lädt nur die Unterschiede nach. Drosselt das CDN (kommt bei den geteilten Adressen von CI-Runnern vor),
@@ -94,11 +95,17 @@ MaxScanSize 4096M
 MaxFiles 200000
 MaxRecursion 32
 ScanHTML no
+LogClean yes
 EOF
 clamd
 clamdscan --ping 300:1 > /dev/null || {{ tail -n 20 /var/log/clamav/clamd.log; exit 2; }}
 clamdscan --version
-exec clamdscan --multiscan --fdpass --infected "$@"
+# Für den Fortschritt: clamdscan meldet bei einem Verzeichnis nur Funde, clamd protokolliert jede fertige Datei
+tail -n 0 -F /var/log/clamav/clamd.log | sed -u "s/^/{CLAMAV_LOG_PREFIX}/" &
+clamdscan --multiscan --fdpass "$@"
+code=$?
+sleep 1
+exit $code
 """
 # Für ein lokal installiertes clamscan. Ohne höhere Grenzen bricht ClamAV bei großen Jars (über 100 MB oder
 # 10000 Dateien) mittendrin ab, im Image stehen dieselben Grenzen in der clamd.conf.
@@ -1298,24 +1305,45 @@ def cmd_scan_clamav(args):
             link = CLAMAV_TODO_DIR / path[len("/scan/"):] if path.startswith("/scan/") else Path(path)
             return todo.get(link, (link, None))
 
+        def shown(path):
+            return path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
+
         process = subprocess.Popen(
             [str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
         )
-        hits = []
+        hits, scanned, started = [], 0, time.monotonic()
         for line in process.stdout:
-            print(line, end="", flush=True)
             line = line.rstrip("\r\n")
+            if line.startswith(CLAMAV_LOG_PREFIX):
+                # clamd protokolliert jede fertige Datei als "<Datum> -> <Pfad>: <Ergebnis>". Angezeigt werden nur
+                # Jars und Zips, die dauern, die Tausenden Configs aus Craftoria würden das Log fluten.
+                entry = re.search(r" -> (.+?): (?:OK|Empty file|.+ FOUND)$", line)
+                if not entry:
+                    print(line[len(CLAMAV_LOG_PREFIX):], flush=True)
+                    continue
+                scanned += 1
+                path = original(entry.group(1))[0]
+                if path.suffix in (".jar", ".zip"):
+                    elapsed = int(time.monotonic() - started)
+                    log(f"[{scanned:>{len(str(len(todo)))}}/{len(todo)} {elapsed // 60}:{elapsed % 60:02d}] "
+                        f"{shown(path)}")
+                continue
+            if line == "/scan: OK":
+                # Das Gesamtergebnis für das Verzeichnis, steht gleich darunter noch einmal in der Zusammenfassung
+                continue
+            print(line, flush=True)
             if line == CLAMAV_FRESHCLAM_FAILED:
                 warn("freshclam konnte die Signaturen nicht aktualisieren, gescannt wird mit denen aus dem Image")
-            match = re.match(r"^(.+?): (.+) FOUND$", line)
-            if match:
-                hits.append((*original(match.group(1)), match.group(2)))
+            # Funde zählen nur aus der Ausgabe von clamdscan selbst, das Protokoll könnte am Ende Zeilen verlieren
+            found = re.match(r"^(.+?): (.+) FOUND$", line)
+            if found:
+                hits.append((*original(found.group(1)), found.group(2)))
         code = process.wait()
         shutil.rmtree(CLAMAV_TODO_DIR)
 
         blocking = []
         for path, sha, signature in hits:
-            rel = path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
+            rel = shown(path)
             label = f"{index[rel]['name']} (`{rel}`)" if rel in index else f"`{rel}`"
             if sha in allowed:
                 log(f"Freigegeben in {SCAN_ALLOWLIST.name}: {rel} ({signature})")
