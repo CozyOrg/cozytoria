@@ -540,6 +540,17 @@ def build_server(cfg, version, client_zip, info):
     # Client-only Mods aus dem Overlay haben auf dem Server nichts verloren
     client_only = [mod for mod in info["overlay_mods"] if mod["side"] == "client"]
 
+    # Server-only Mods lässt packwiz aus der Client-ZIP weg, der ServerStarter lädt sie nach dem Pack direkt herunter
+    additional_files = []
+    for mod in info["overlay_mods"]:
+        if mod["side"] != "server":
+            continue
+        url = download_url(mod)
+        if not url or not mod["filename"]:
+            fail(f"{mod['name']} hat side = \"server\", aber die Metadaten nennen keine Download-Adresse")
+        destination = json.dumps(f"mods/{mod['filename']}", ensure_ascii=False)
+        additional_files.append(f"{{url: {json.dumps(url, ensure_ascii=False)}, destination: {destination}}}")
+
     config = SERVER_DIR / SERVER_CONFIG
     text = read_text(config)
     text = yaml_set(text, "name", json.dumps(cfg["name"], ensure_ascii=False))
@@ -547,6 +558,7 @@ def build_server(cfg, version, client_zip, info):
     text = yaml_set(text, "modpackUrl", modpack_url)
     text = yaml_append(text, "ignoreProject", [f"{mod['cf']} # {mod['name']}" for mod in client_only if mod["cf"]])
     text = yaml_append(text, "ignoreFiles", [f"mods/{mod['filename']}" for mod in client_only if not mod["cf"] and mod["filename"]])
+    text = yaml_append(text, "additionalFiles", additional_files)
     write_text(config, text)
 
     server_zip = DIST / f"{cfg['name']}-Server-{version}.zip"
@@ -618,7 +630,8 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     )
     previous, changes, commits = changelog(cfg, lock, info)
 
-    added_mods = [mod["name"] + (" (nur Client)" if mod["side"] == "client" else "") for mod in info["overlay_mods"]]
+    side_notes = {"client": " (nur Client)", "server": " (nur Server)"}
+    added_mods = [mod["name"] + side_notes.get(mod["side"], "") for mod in info["overlay_mods"]]
     removed = [entry["name"] for entry in info["removed"]]
 
     sections = [

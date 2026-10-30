@@ -24,7 +24,7 @@ Java 21 nötig.
 
 1. `Cozytoria-Server-<version>.zip` entpacken.
 2. `startserver.sh` (Linux/macOS) bzw. `startserver.bat` (Windows) starten. Der ServerStarter lädt NeoForge,
-   die Client-ZIP aus dem Release und alle Mods, Client-only Mods lässt er weg.
+   die Client-ZIP aus dem Release und alle Mods, Client-only Mods lässt er weg, Server-only Mods lädt er zusätzlich.
 
 **Update:** die neue `server-setup-config.yaml` (oder die ganze Server-ZIP) über die alte kopieren und neu starten.
 Der ServerStarter erkennt an der geänderten `modpackUrl`, dass er neu installieren muss, und schiebt den alten
@@ -66,7 +66,9 @@ python3 scripts/cozytoria.py packwiz update <mod>
   Liegt so eine Datei trotzdem im Overlay, warnt auch der Build.
 - **Client-only Mods:** in der `.pw.toml` `side = "client"` setzen. Der Build trägt sie dann automatisch in
   `ignoreProject` (CurseForge) bzw. `ignoreFiles` (andere Quellen) der Server-Config ein.
-- `side = "server"` funktioniert nicht: Der Server installiert aus der Client-ZIP, und dort fehlt die Mod dann.
+- **Server-only Mods** (z. B. BlueMap): `side = "server"`. packwiz lässt sie aus der Client-ZIP weg, der Build trägt
+  sie stattdessen mit ihrer Download-Adresse in `additionalFiles` der Server-Config ein. Der ServerStarter lädt sie
+  dann nach dem Pack direkt nach `mods/`.
 - Bringt das Overlay eine Mod mit, die Craftoria auch hat, gewinnt **immer** unsere Version, auch wenn Craftoria
   später eine neuere hat. Nach `packwiz update` auf eine Craftoria-Mod also im Blick behalten.
 
