@@ -134,17 +134,24 @@ python3 scripts/cozytoria.py test-server
 
 ## Malware-Scan
 
-Jeder Build-Lauf scannt parallel zum Servertest die Dateien des Packs (Workflow **Malware-Scan**). Zusätzlich
-läuft der Scan jede Nacht auf `main`. Dort ändern sich die Jars nicht, die Signaturen aber schon. Wird eine Mod, die
-ihr längst ausliefert, nachträglich als Malware bekannt, wird der nächtliche Lauf rot, und GitHub schickt eine Mail.
-Von Hand starten geht unter Actions → Malware-Scan → Run workflow.
+Jeder Build-Lauf scannt parallel zum Servertest die Dateien des Packs (Workflow **Malware-Scan**), aber nur die, die
+noch nie sauber gescannt wurden, meist also nur neue oder aktualisierte Mods. Das dauert ein paar Minuten statt einer
+halben Stunde. Welche Dateien schon sauber waren, merkt sich der Scan im Actions-Cache (`build/scan/clamav.json`).
+
+Jede Nacht auf `main` läuft ein **Vollscan** über alles mit den aktuellen Signaturen. Dort ändern sich die Jars nicht,
+die Signaturen aber schon. Wird eine Mod, die ihr längst ausliefert, nachträglich als Malware bekannt, wird der
+nächtliche Lauf rot, und GitHub schickt eine Mail. Die Datei fliegt dabei aus der Liste der sauberen Dateien, ab dann
+schlägt jeder Build an, bis sie raus oder freigegeben ist.
+
+Vollscan von Hand: Actions → Malware-Scan → Run workflow (Haken „Alle Dateien scannen“ ist gesetzt). Beim Release
+(Actions → Build → Run workflow) gibt es denselben Haken, dort ist er standardmäßig aus.
 
 1. **Alles laden:** Alle Mods, Resourcepacks und Shaderpacks kommen direkt von CurseForge bzw. Modrinth, auch die
    reinen Client-Mods, die der Servertest überspringt. Jede Datei wird gegen die Prüfsumme aus ihrer `.pw.toml`
    geprüft. Passt eine nicht, wird der Lauf rot.
-2. **ClamAV** scannt jedes Mal alles mit den aktuellen Signaturen, auch Craftorias Configs und Skripte und Jars, die
-   Craftoria direkt mitbringt (z. B. `InstanceSync.jar`). Jeder Fund macht den Lauf rot. Wegen der vielen Dateien in
-   den Jars dauert das gut zehn Minuten, läuft aber parallel zum Servertest. Das Log zeigt jedes fertige Jar.
+2. **ClamAV** scannt neue Dateien bzw. beim Vollscan alles, auch Craftorias Configs und Skripte und Jars, die
+   Craftoria direkt mitbringt (z. B. `InstanceSync.jar`). Jeder Fund macht den Lauf rot. Ein Vollscan dauert wegen
+   der vielen Dateien in den Jars rund eine halbe Stunde. Das Log zeigt jedes fertige Jar.
 
 Ein Release gibt es nur, wenn der Scan grün ist. Funde stehen in der Zusammenfassung des Runs, das Ergebnis
 außerdem in der Discord-Ankündigung.
@@ -160,7 +167,8 @@ Lokal (Docker oder ein installiertes ClamAV, lädt rund 1,3 GB):
 ```bash
 python3 scripts/cozytoria.py assemble
 python3 scripts/cozytoria.py fetch-mods
-python3 scripts/cozytoria.py scan-clamav
+python3 scripts/cozytoria.py scan-clamav          # nur neue Dateien
+python3 scripts/cozytoria.py scan-clamav --full   # alles
 ```
 
 ## Craftoria-Updates

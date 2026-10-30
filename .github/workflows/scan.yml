@@ -1,10 +1,15 @@
 name: Malware-Scan
 
-# Lädt alle Dateien des Packs und scannt sie komplett mit ClamAV, bei jedem Build (aus build.yml heraus) und
-# zusätzlich jede Nacht auf main: Wird eine Mod, die wir längst ausliefern, nachträglich als Malware bekannt,
+# Lädt alle Dateien des Packs und scannt sie mit ClamAV. Bei jedem Build (aus build.yml heraus) nur Dateien, die noch
+# nie sauber gescannt wurden, meist also nur neue Jars. Der nächtliche Lauf auf main und ein Start von Hand scannen
+# alles mit den aktuellen Signaturen: Wird eine Mod, die wir längst ausliefern, nachträglich als Malware bekannt,
 # fällt das spätestens am nächsten Tag auf.
 on:
   workflow_call:
+    inputs:
+      full-scan:
+        type: boolean
+        default: false
     outputs:
       result:
         description: Ergebnis in einer Zeile, für die Ankündigung im Discord
@@ -12,6 +17,11 @@ on:
   schedule:
     - cron: "41 3 * * *"
   workflow_dispatch:
+    inputs:
+      full-scan:
+        description: Alle Dateien scannen, nicht nur neue
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -58,6 +68,23 @@ jobs:
           path: build/scan/files
           key: ${{ steps.files-cache.outputs.cache-primary-key }}
 
+      # Welche Dateien schon sauber waren, merkt sich der Scan hier, so bleibt der Build schnell
+      - name: Restore scan results
+        uses: actions/cache/restore@v4
+        with:
+          path: build/scan/clamav.json
+          key: clamav-results-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: clamav-results-
+
       - name: Scan with ClamAV
         id: clamav
-        run: python3 scripts/cozytoria.py scan-clamav
+        run: >-
+          python3 scripts/cozytoria.py scan-clamav
+          ${{ (github.event_name == 'schedule' || inputs.full-scan) && '--full' || '' }}
+
+      - name: Save scan results
+        if: always() && steps.fetch.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: build/scan/clamav.json
+          key: clamav-results-${{ github.run_id }}-${{ github.run_attempt }}
