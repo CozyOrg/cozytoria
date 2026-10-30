@@ -106,11 +106,11 @@ das es nicht gibt, zum Testen also die Client-ZIP importieren oder `modpackSourc
 - **Pushes und Pull Requests** bauen nur zur Kontrolle, die ZIPs hängen als Artefakt am Workflow-Run.
 - Die Release-Notes enthalten einen Changelog seit dem letzten Release: Craftoria-Update, neue, aktualisierte und
   entfernte Mods sowie die Commit-Betreffs. Gute Commit-Messages landen also direkt bei den Spielern.
-- Jedes Release wird zusätzlich im Discord angekündigt: Ping, großer Download-Link, Changelog und alle zusätzlichen
-  Mods (siehe Einrichtung). Wer gepingt wird, steht in `cozytoria.json` unter `discord.mention`: `@everyone`,
-  eine Rolle als `<@&ROLLEN-ID>` oder leer für keinen Ping. Unter „Was ist neu“ stehen dort nur Commits, die Spieler
-  betreffen: `feat: Mehr Quests` wird zu „Mehr Quests“, `ci:`, `docs:`, `chore:`, `refactor:`, `style:`, `test:`
-  und `build:` werden ausgeblendet.
+- Jedes Release wird zusätzlich im Discord angekündigt: Ping, großer Download-Link, Changelog, alle zusätzlichen
+  Mods und in einer Zeile das Ergebnis des Malware-Scans (siehe Einrichtung). Wer gepingt wird, steht in
+  `cozytoria.json` unter `discord.mention`: `@everyone`, eine Rolle als `<@&ROLLEN-ID>` oder leer für keinen Ping.
+  Unter „Was ist neu“ stehen dort nur Commits, die Spieler betreffen: `feat: Mehr Quests` wird zu „Mehr Quests“,
+  `ci:`, `docs:`, `chore:`, `refactor:`, `style:`, `test:` und `build:` werden ausgeblendet.
 
 ## Servertest
 
@@ -139,33 +139,25 @@ Von Hand starten geht unter Actions → Malware-Scan → Run workflow.
 1. **Alles laden:** Alle Mods, Resourcepacks und Shaderpacks kommen direkt von CurseForge bzw. Modrinth, auch die
    reinen Client-Mods, die der Servertest überspringt. Jede Datei wird gegen die Prüfsumme aus ihrer `.pw.toml`
    geprüft. Passt eine nicht, wird der Lauf rot.
-2. **ClamAV** scannt alles, auch Craftorias Configs und Skripte und Jars, die Craftoria direkt mitbringt (z. B.
-   `InstanceSync.jar`). Jeder Fund macht den Lauf rot. Ein kompletter Scan dauert wegen der vielen Dateien in den
-   Jars lange. Deshalb scannt ein Build nur Dateien, die noch kein Lauf sauber gescannt hat, meist also nur neue
-   Jars. Der nächtliche Lauf scannt alles mit den aktuellen Signaturen. Findet er etwas, ist die Datei nicht mehr
-   „sauber“, ab dann wird jeder Build rot, bis sie ersetzt oder freigegeben ist.
-3. **VirusTotal** prüft jedes Jar einmal: bekannte Jars über ihren Hash, unbekannte werden hochgeladen. Die kostenlose
-   API erlaubt 4 Anfragen pro Minute und 500 pro Tag. Deshalb merkt sich der Workflow geprüfte Jars im Actions-Cache
-   und nimmt sich pro Build höchstens 15 Minuten, nachts 90. Eure eigenen Mods aus `overlay/` kommen zuerst dran.
-   Beim ersten Mal dauert es einige Tage, bis alle rund 530 Jars durch sind, danach sind es nur noch neue.
-   Ab 3 Engines mit „malicious“ wird der Lauf rot. Ein oder zwei Treffer sind bei Jars oft Fehlalarme, etwa bei Mods
-   mit Auto-Updater, dafür gibt es nur eine Warnung.
+2. **ClamAV** scannt jedes Mal alles mit den aktuellen Signaturen, auch Craftorias Configs und Skripte und Jars, die
+   Craftoria direkt mitbringt (z. B. `InstanceSync.jar`). Jeder Fund macht den Lauf rot. Wegen der vielen Dateien in
+   den Jars dauert das gut zehn Minuten, läuft aber parallel zum Servertest. Das Log zeigt jedes fertige Jar.
 
-Ein Release gibt es nur, wenn der Scan grün ist. Funde und Warnungen stehen in der Zusammenfassung des Runs.
+Ein Release gibt es nur, wenn der Scan grün ist. Funde stehen in der Zusammenfassung des Runs, das Ergebnis
+außerdem in der Discord-Ankündigung.
 Ein Scanner kennt nur Malware, die schon bekannt ist. Ganz neue Malware erkennt er am ersten Tag meist nicht.
 Craftoria-Updates also lieber erst mergen, wenn das Release ein paar Tage alt ist.
 
-**Fehlalarm:** Erst genau hinsehen: Welche Engines melden was, und ist die Mod bekannt? Bei VirusTotal führt der Link
-aus der Warnung dorthin. Ist die Datei sicher harmlos, ihren SHA-256 (steht in der Meldung bzw. im Link) mit Kommentar
-in `scan-allowlist.txt` eintragen. Die Freigabe gilt nur für genau diese Datei, ein Update der Mod wird wieder geprüft.
+**Fehlalarm:** Erst genau hinsehen: Welche Signatur schlägt an, und ist die Mod bekannt? Ist die Datei sicher harmlos,
+ihren SHA-256 (steht in der Meldung) mit Kommentar in `scan-allowlist.txt` eintragen. Die Freigabe gilt nur für genau
+diese Datei, ein Update der Mod wird wieder geprüft.
 
 Lokal (Docker oder ein installiertes ClamAV, lädt rund 1,3 GB):
 
 ```bash
 python3 scripts/cozytoria.py assemble
 python3 scripts/cozytoria.py fetch-mods
-python3 scripts/cozytoria.py scan-clamav --full
-VIRUSTOTAL_API_KEY=<key> python3 scripts/cozytoria.py scan-virustotal
+python3 scripts/cozytoria.py scan-clamav
 ```
 
 ## Craftoria-Updates
@@ -185,10 +177,6 @@ starten (siehe oben). Den Check selbst manuell auslösen geht unter Actions → 
   Actions → New repository secret, oder `gh secret set DISCORD_WEBHOOK_URL -R CozyOrg/cozytoria` und URL einfügen).
   Die URL gehört nicht ins Repo: Wer sie kennt, kann in euren Kanal schreiben. Ohne Secret wird die Ankündigung
   übersprungen.
-- **VirusTotal:** kostenlosen Account auf [virustotal.com](https://www.virustotal.com) anlegen, den Key unter
-  Profil → API Key kopieren und genauso als Secret `VIRUSTOTAL_API_KEY` hinterlegen. Ohne Secret scannt nur ClamAV,
-  und der Lauf zeigt eine Warnung. Die kostenlose API ist nur für nicht-kommerzielle Nutzung gedacht, für euch passt
-  das. Hochgeladene Jars sieht danach auch die Sicherheitsbranche, bei öffentlichen Mods ist das egal.
 - **Sichtbarkeit:** Der ServerStarter lädt die Client-ZIP ohne Login aus dem Release, das Repo muss dafür
   **öffentlich** sein. Bei einem privaten Repo in `cozytoria.json` `"modpackSource": "bundled"` setzen: Dann liegt
   die Client-ZIP in der Server-ZIP und wird per `file://` gelesen (Server-ZIP wird dadurch ~65 MB groß).

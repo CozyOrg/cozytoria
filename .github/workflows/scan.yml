@@ -1,30 +1,17 @@
 name: Malware-Scan
 
-# Lädt alle Dateien des Packs, scannt sie mit ClamAV und prüft neue Jars zusätzlich bei VirusTotal.
-# Bei jedem Build (aus build.yml heraus) scannt ClamAV nur Dateien, die noch nie sauber gescannt wurden.
-# Der tägliche Lauf auf main scannt alles mit den aktuellen Signaturen: Wird eine Mod, die wir längst
-# ausliefern, nachträglich als Malware bekannt, fällt das spätestens am nächsten Tag auf.
+# Lädt alle Dateien des Packs und scannt sie komplett mit ClamAV, bei jedem Build (aus build.yml heraus) und
+# zusätzlich jede Nacht auf main: Wird eine Mod, die wir längst ausliefern, nachträglich als Malware bekannt,
+# fällt das spätestens am nächsten Tag auf.
 on:
   workflow_call:
-    inputs:
-      full-scan:
-        type: boolean
-        default: false
-      virustotal-minutes:
-        type: number
-        default: 15
+    outputs:
+      result:
+        description: Ergebnis in einer Zeile, für die Ankündigung im Discord
+        value: ${{ jobs.scan.outputs.result }}
   schedule:
     - cron: "41 3 * * *"
   workflow_dispatch:
-    inputs:
-      full-scan:
-        description: Alle Dateien mit ClamAV scannen, nicht nur neue
-        type: boolean
-        default: true
-      virustotal-minutes:
-        description: Minuten für VirusTotal (kostenlos sind 4 Anfragen pro Minute und 500 pro Tag)
-        type: number
-        default: 90
 
 permissions:
   contents: read
@@ -32,7 +19,9 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 60
+    outputs:
+      result: ${{ steps.clamav.outputs.result }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -69,33 +58,6 @@ jobs:
           path: build/scan/files
           key: ${{ steps.files-cache.outputs.cache-primary-key }}
 
-      # Welche Dateien schon sauber waren (ClamAV) bzw. schon geprüft sind (VirusTotal), merkt sich der Scan hier.
-      # So bleibt der Build schnell, und das kostenlose VirusTotal-Kontingent reicht für die neuen Jars.
-      - name: Restore scan results
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            build/scan/clamav.json
-            build/scan/virustotal.json
-          key: scan-results-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: scan-results-
-
       - name: Scan with ClamAV
-        run: >-
-          python3 scripts/cozytoria.py scan-clamav
-          ${{ (github.event_name == 'schedule' || inputs.full-scan) && '--full' || '' }}
-
-      - name: Check with VirusTotal
-        if: always() && steps.fetch.outcome == 'success'
-        env:
-          VIRUSTOTAL_API_KEY: ${{ secrets.VIRUSTOTAL_API_KEY }}
-        run: python3 scripts/cozytoria.py scan-virustotal --minutes ${{ inputs.virustotal-minutes || 90 }}
-
-      - name: Save scan results
-        if: always() && steps.fetch.outcome == 'success'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            build/scan/clamav.json
-            build/scan/virustotal.json
-          key: scan-results-${{ github.run_id }}-${{ github.run_attempt }}
+        id: clamav
+        run: python3 scripts/cozytoria.py scan-clamav

@@ -85,7 +85,6 @@ jobs:
 
   scan:
     uses: ./.github/workflows/scan.yml
-    secrets: inherit
 
   release:
     needs: [build, scan]
@@ -121,4 +120,5 @@ jobs:
       - name: Announce release on Discord
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          MALWARE_SCAN: ${{ needs.scan.outputs.result }}
         run: python3 scripts/cozytoria.py notify-discord

@@ -1,4 +1,4 @@
-# Geprüfte Fehlalarme des Malware-Scans (ClamAV und VirusTotal), siehe README unter „Malware-Scan“.
+# Geprüfte Fehlalarme des Malware-Scans (ClamAV), siehe README unter „Malware-Scan“.
 # Eine Datei pro Zeile: SHA-256, dahinter als Kommentar Datei und Begründung. Die Freigabe gilt nur für genau
 # diese Datei, eine neue Version der Mod wird wieder geprüft.
 #
