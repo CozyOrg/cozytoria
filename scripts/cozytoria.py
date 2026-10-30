@@ -8,11 +8,16 @@
   check-upstream      Nach einem neuen Craftoria-Release suchen und upstream.json anpassen
   notify-discord      Das zuletzt gebaute Release im Discord ankündigen (Webhook aus DISCORD_WEBHOOK_URL)
   test-server         Server aus dist/ installieren, starten und wieder stoppen (braucht bash und Java 21)
+  fetch-mods          Alle Dateien aus den Metadaten in build/pack nach build/scan/files laden und Prüfsummen prüfen
+  scan-clamav         Neue Dateien aus build/pack und build/scan/files mit ClamAV scannen (braucht Docker oder
+                      clamscan), --full scannt alle mit den aktuellen Signaturen
+  scan-virustotal     Jars bei VirusTotal prüfen, Ergebnisse in build/scan/virustotal.json (Key aus VIRUSTOTAL_API_KEY)
 
 Braucht nur Python 3.9+ und git, packwiz wird automatisch heruntergeladen.
 """
 
 import argparse
+import concurrent.futures
 import hashlib
 import io
 import json
@@ -29,6 +34,7 @@ import tarfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from datetime import datetime, timezone
@@ -41,11 +47,18 @@ UPSTREAM_DIR = BUILD / "upstream"
 PACK_DIR = BUILD / "pack"
 SERVER_DIR = BUILD / "server"
 TEST_SERVER_DIR = BUILD / "test-server"
+SCAN_DIR = BUILD / "scan"
+SCAN_FILES_DIR = SCAN_DIR / "files"
+SCAN_INDEX = SCAN_DIR / "files.json"
+CLAMAV_CACHE = SCAN_DIR / "clamav.json"
+CLAMAV_TODO_DIR = SCAN_DIR / "todo"
+VIRUSTOTAL_CACHE = SCAN_DIR / "virustotal.json"
 OVERLAY_DIR = ROOT / "overlay"
 PATCHES_DIR = ROOT / "patches"
 REMOVE_FILE = ROOT / "remove.txt"
 CONFIG_FILE = ROOT / "cozytoria.json"
 LOCK_FILE = ROOT / "upstream.json"
+SCAN_ALLOWLIST = ROOT / "scan-allowlist.txt"
 
 # Der packwiz-Fork, mit dem auch Craftoria gebaut wird. Er schreibt für jede Mod eine
 # downloadUrl in die manifest.json, ohne die der TeamAOF-ServerStarter nichts laden kann.
@@ -62,6 +75,46 @@ DISCORD_DESCRIPTION_LIMIT = 3900
 TECHNICAL_COMMIT_TYPES = {"build", "chore", "ci", "docs", "refactor", "style", "test"}
 # Diese Zeile schreibt der Minecraft-Server, sobald er komplett gestartet ist
 SERVER_DONE_PATTERN = re.compile(r"Done \(\d+[.,]\d+s\)! For help")
+
+CURSEFORGE_CDN = "https://mediafilez.forgecdn.net/files"
+# Offizielles Image mit vorinstallierten Signaturen, die Debian-Variante gibt es auch für arm64
+CLAMAV_IMAGE = "clamav/clamav:1.5-debian"
+CLAMAV_FRESHCLAM_FAILED = "freshclam fehlgeschlagen"
+# Im Image läuft der Daemon statt clamscan: Er lädt die Signaturen einmal und scannt mit einem Thread pro Kern,
+# clamscan allein bräuchte für alle Mods weit über eine halbe Stunde. Die Signaturen im Image sind ein paar Tage alt,
+# freshclam lädt nur die Unterschiede nach. Drosselt das CDN (kommt bei den geteilten Adressen von CI-Runnern vor),
+# wird mit den Signaturen aus dem Image gescannt. ScanHTML normalisiert jede Textdatei, auch die Tausenden JSONs in
+# den Jars, und kostet so ein Drittel der Zeit. Für Java-Malware ist es ohne Bedeutung.
+CLAMAV_SCRIPT = f"""
+freshclam --stdout --quiet || echo "{CLAMAV_FRESHCLAM_FAILED}"
+cat >> /etc/clamav/clamd.conf <<EOF
+MaxThreads $(nproc)
+MaxFileSize 1024M
+MaxScanSize 4096M
+MaxFiles 200000
+MaxRecursion 32
+ScanHTML no
+EOF
+clamd
+clamdscan --ping 300:1 > /dev/null || {{ tail -n 20 /var/log/clamav/clamd.log; exit 2; }}
+clamdscan --version
+exec clamdscan --multiscan --fdpass --infected "$@"
+"""
+# Für ein lokal installiertes clamscan. Ohne höhere Grenzen bricht ClamAV bei großen Jars (über 100 MB oder
+# 10000 Dateien) mittendrin ab, im Image stehen dieselben Grenzen in der clamd.conf.
+CLAMSCAN_OPTIONS = ["--recursive", "--infected", "--max-filesize=1024M", "--max-scansize=4096M",
+                    "--max-files=200000", "--max-recursion=32", "--scan-html=no"]
+VIRUSTOTAL_API = "https://www.virustotal.com/api/v3"
+# Kostenlose API: 4 Anfragen pro Minute und 500 pro Tag
+VIRUSTOTAL_INTERVAL = 15.5
+VIRUSTOTAL_DIRECT_UPLOAD = 32 * 1024 * 1024
+VIRUSTOTAL_MAX_UPLOAD = 650 * 1024 * 1024
+# Ab so vielen Engines mit "malicious" schlägt der Scan fehl. Ein, zwei Treffer sind bei Jars häufig Fehlalarme,
+# etwa bei Mods mit Auto-Updater oder Discord-Anbindung, dafür gibt es nur eine Warnung.
+VIRUSTOTAL_FAIL_AT = 3
+# So oft wird ein frisch hochgeladenes Jar im selben Lauf nachgefragt, danach im nächsten Lauf
+VIRUSTOTAL_RECHECKS = 5
+VIRUSTOTAL_RECHECK_DELAY = 90
 
 IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
 warnings = []
@@ -226,16 +279,22 @@ def read_metadata(path):
 
 
 def parse_metadata(text, fallback_name):
-    def field(pattern):
-        match = re.search(pattern, text, re.M)
-        return match.group(1) if match else None
+    def field(key):
+        # Strings stehen in "…" oder (von Prism geschrieben) in '…', Zahlen ohne Anführungszeichen
+        match = re.search(rf"""^{key}\s*=\s*(?:"([^"]*)"|'([^']*)'|(\d+))""", text, re.M)
+        return next((group for group in match.groups() if group), None) if match else None
 
+    curseforge = "[update.curseforge]" in text
     return {
-        "name": field(r'^name\s*=\s*"([^"]+)"') or fallback_name,
-        "filename": field(r'^filename\s*=\s*"([^"]+)"'),
-        "side": field(r'^side\s*=\s*"(\w+)"') or "both",
-        "cf": field(r"^project-id\s*=\s*(\d+)") if "[update.curseforge]" in text else None,
-        "mr": field(r'^mod-id\s*=\s*"([^"]+)"') if "[update.modrinth]" in text else None,
+        "name": field("name") or fallback_name,
+        "filename": field("filename"),
+        "side": field("side") or "both",
+        "cf": field("project-id") if curseforge else None,
+        "cf_file": field("file-id") if curseforge else None,
+        "mr": field("mod-id") if "[update.modrinth]" in text else None,
+        "url": field("url"),
+        "hash_format": field("hash-format"),
+        "hash": field("hash"),
     }
 
 
@@ -629,6 +688,263 @@ def write_release_notes(cfg, lock, version, info, client_zip, server_zip):
     save_json(BUILD / "discord-payload.json", payload)
 
 
+# --- Malware-Scan ----------------------------------------------------------------------------
+
+def download_url(meta):
+    if meta["url"]:
+        return meta["url"]
+    if meta["cf_file"] and meta["filename"]:
+        # Dieselbe CDN-Adresse, die CurseForge selbst ausliefert, braucht keinen API-Key
+        file_id = int(meta["cf_file"])
+        return f"{CURSEFORGE_CDN}/{file_id // 1000}/{file_id % 1000}/{urllib.parse.quote(meta['filename'])}"
+    return None
+
+
+def hash_matches(data, meta):
+    # None, wenn sich die Prüfsumme nicht prüfen lässt
+    algorithm = (meta["hash_format"] or "").lower()
+    if not meta["hash"] or algorithm not in hashlib.algorithms_available:
+        return None
+    return hashlib.new(algorithm, data).hexdigest() == meta["hash"].lower()
+
+
+def download_with_retry(url, attempts=3):
+    for attempt in range(1, attempts + 1):
+        try:
+            return http_get(url)
+        except urllib.error.HTTPError as error:
+            if attempt == attempts or (error.code < 500 and error.code != 429):
+                raise
+        except (urllib.error.URLError, OSError, subprocess.CalledProcessError):
+            if attempt == attempts:
+                raise
+        time.sleep(5 * attempt)
+
+
+def fetch_scan_file(meta, dest):
+    # Liefert (Herkunft, SHA-256), die Datei liegt danach geprüft in dest
+    if dest.exists():
+        data = dest.read_bytes()
+        if hash_matches(data, meta):
+            return "cache", hashlib.sha256(data).hexdigest()
+    url = download_url(meta)
+    if not url:
+        raise ValueError("keine Download-Adresse in den Metadaten")
+    data = download_with_retry(url)
+    if hash_matches(data, meta) is False:
+        raise ValueError(f"Prüfsumme passt nicht zu den Metadaten, die Datei von {url} wurde verändert")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return "geladen", hashlib.sha256(data).hexdigest()
+
+
+def describe_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, urllib.error.URLError):
+        return str(error.reason)
+    return str(error)
+
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def scan_index():
+    if not SCAN_INDEX.exists():
+        fail("build/scan/files.json fehlt, vorher fetch-mods ausführen")
+    return load_json(SCAN_INDEX)
+
+
+def load_allowlist():
+    allowed = set()
+    if not SCAN_ALLOWLIST.exists():
+        return allowed
+    for number, line in enumerate(read_text(SCAN_ALLOWLIST).splitlines(), 1):
+        value = line.split("#", 1)[0].strip().lower()
+        if not value:
+            continue
+        if not re.fullmatch(r"[0-9a-f]{64}", value):
+            fail(f"{SCAN_ALLOWLIST.name}, Zeile {number}: '{value}' ist kein SHA-256")
+        allowed.add(value)
+    return allowed
+
+
+def write_summary(lines):
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+
+
+class VirusTotalStop(Exception):
+    """Zeitbudget, Tageskontingent oder VirusTotal selbst beendet die Prüfung für diesen Lauf."""
+
+
+class VirusTotal:
+    def __init__(self, key, deadline):
+        self.key = key
+        self.deadline = deadline
+        self.last = 0.0
+
+    def request(self, method, url, data=None, content_type=None):
+        # Liefert die JSON-Antwort oder None bei 404, hält das Minutenlimit selbst ein
+        if url.startswith("/"):
+            url = VIRUSTOTAL_API + url
+        for attempt in (1, 2):
+            ready = self.last + VIRUSTOTAL_INTERVAL
+            if ready > self.deadline:
+                raise VirusTotalStop("Zeitbudget aufgebraucht")
+            time.sleep(max(0.0, ready - time.monotonic()))
+            self.last = time.monotonic()
+            headers = {"x-apikey": self.key, "Accept": "application/json", "User-Agent": "cozytoria-build"}
+            if content_type:
+                headers["Content-Type"] = content_type
+            request = urllib.request.Request(url, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(request, timeout=600, context=ssl_context()) as response:
+                    return json.loads(response.read())
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    return None
+                if error.code in (401, 403):
+                    fail(f"VirusTotal lehnt den API-Key ab (HTTP {error.code}), VIRUSTOTAL_API_KEY prüfen")
+                if error.code == 429 and attempt == 1:
+                    # Minutenlimit trotz Abstand erreicht: eine volle Minute warten und einmal neu versuchen
+                    self.last = time.monotonic() + 60 - VIRUSTOTAL_INTERVAL
+                    continue
+                if error.code == 429:
+                    raise VirusTotalStop("Tageskontingent der kostenlosen API aufgebraucht")
+                raise VirusTotalStop(f"VirusTotal antwortet mit HTTP {error.code}")
+            except (urllib.error.URLError, OSError) as error:
+                raise VirusTotalStop(f"VirusTotal ist nicht erreichbar: {describe_error(error)}")
+
+
+def multipart_file(filename, data):
+    boundary = "cozytoria" + os.urandom(12).hex()
+    safe_name = re.sub(r"[^A-Za-z0-9._+-]", "_", filename)
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+        "Content-Type: application/octet-stream\r\n\r\n"
+    ).encode()
+    return head + data + f"\r\n--{boundary}--\r\n".encode(), f"multipart/form-data; boundary={boundary}"
+
+
+def virustotal_upload(vt, path):
+    # Liefert die ID der Analyse
+    url = "/files"
+    if path.stat().st_size > VIRUSTOTAL_DIRECT_UPLOAD:
+        url = vt.request("GET", "/files/upload_url")["data"]
+    body, content_type = multipart_file(path.name, path.read_bytes())
+    return vt.request("POST", url, body, content_type)["data"]["id"]
+
+
+def virustotal_record(entry, stats, results):
+    flagged = sorted(
+        f"{engine}: {result.get('result') or result.get('category')}"
+        for engine, result in results.items() if result.get("category") in ("malicious", "suspicious")
+    )
+    return {
+        "name": entry["name"],
+        "status": "done",
+        "malicious": stats.get("malicious", 0),
+        "suspicious": stats.get("suspicious", 0),
+        "engines": flagged,
+        "checked": datetime.now(timezone.utc).date().isoformat(),
+    }
+
+
+def virustotal_check(vt, jars, cache):
+    def record(entry, stats, results):
+        cache[entry["sha256"]] = virustotal_record(entry, stats, results)
+        result = cache[entry["sha256"]]
+        log(f"VirusTotal: {entry['name']}: {result['malicious']} malicious, {result['suspicious']} suspicious")
+
+    unique = {entry["sha256"]: entry for entry in jars}
+    todo = [entry for sha, entry in unique.items() if cache.get(sha, {}).get("status") not in ("done", "too-large")]
+    # Eigene Mods zuerst, dann schon hochgeladene Jars, deren Ergebnis inzwischen da sein dürfte
+    todo.sort(key=lambda entry: (
+        not entry["overlay"], cache.get(entry["sha256"], {}).get("status") != "pending", entry["file"],
+    ))
+    waiting = []  # (frühestens, Eintrag, bisherige Nachfragen) für frisch hochgeladene Jars
+    while todo or waiting:
+        if todo:
+            entry, rechecks = todo.pop(0), 0
+        else:
+            waiting.sort(key=lambda item: item[0])
+            ready, entry, rechecks = waiting.pop(0)
+            if ready > vt.deadline:
+                raise VirusTotalStop("Zeitbudget aufgebraucht")
+            time.sleep(max(0.0, ready - time.monotonic()))
+        sha = entry["sha256"]
+
+        analysis_id = cache.get(sha, {}).get("analysis")
+        if analysis_id:
+            analysis = vt.request("GET", f"/analyses/{analysis_id}")
+            attributes = (analysis or {}).get("data", {}).get("attributes", {})
+            if attributes.get("status") == "completed":
+                record(entry, attributes.get("stats", {}), attributes.get("results", {}))
+                continue
+            if analysis is not None:
+                if rechecks < VIRUSTOTAL_RECHECKS:
+                    waiting.append((time.monotonic() + VIRUSTOTAL_RECHECK_DELAY, entry, rechecks + 1))
+                continue
+
+        report = vt.request("GET", f"/files/{sha}")
+        attributes = (report or {}).get("data", {}).get("attributes", {})
+        if attributes.get("last_analysis_results"):
+            record(entry, attributes.get("last_analysis_stats", {}), attributes["last_analysis_results"])
+            continue
+
+        path = ROOT / entry["file"]
+        if path.stat().st_size > VIRUSTOTAL_MAX_UPLOAD:
+            cache[sha] = {"name": entry["name"], "status": "too-large"}
+            warn(f"{entry['name']} ist zu groß für VirusTotal und wird dort nicht geprüft")
+            continue
+        cache[sha] = {"name": entry["name"], "status": "pending", "analysis": virustotal_upload(vt, path)}
+        log(f"VirusTotal: {entry['name']} war unbekannt und wurde hochgeladen")
+        waiting.append((time.monotonic() + VIRUSTOTAL_RECHECK_DELAY, entry, 0))
+
+
+def virustotal_report(jars, cache, allowed):
+    blocking, notes = [], []
+    unique = {entry["sha256"]: entry for entry in jars}
+    for sha, entry in sorted(unique.items(), key=lambda item: item[1]["file"]):
+        result = cache.get(sha, {})
+        if result.get("status") != "done" or not (result["malicious"] or result["suspicious"]):
+            continue
+        text = (
+            f"{entry['name']} (`{Path(entry['file']).name}`): {result['malicious']} malicious, "
+            f"{result['suspicious']} suspicious ({', '.join(result['engines'])}) "
+            f"https://www.virustotal.com/gui/file/{sha}"
+        )
+        if sha in allowed:
+            log(f"Freigegeben in {SCAN_ALLOWLIST.name}: {text}")
+        elif result["malicious"] >= VIRUSTOTAL_FAIL_AT:
+            blocking.append(text)
+        else:
+            notes.append(text)
+            warn(f"VirusTotal: {text}")
+
+    statuses = [cache.get(sha, {}).get("status") for sha in unique]
+    done, pending = statuses.count("done"), statuses.count("pending")
+    open_count = len(unique) - done - pending - statuses.count("too-large")
+    status = f"{done} von {len(unique)} Jars geprüft, {pending} warten auf ihr Ergebnis, {open_count} sind noch nicht dran"
+    log(f"VirusTotal: {status}")
+    summary = ["### VirusTotal", status]
+    if blocking:
+        summary += ["", f"**Blockiert (ab {VIRUSTOTAL_FAIL_AT} Engines):**"] + [f"- {text}" for text in blocking]
+    if notes:
+        summary += ["", "**Einzelne Treffer, meist Fehlalarme:**"] + [f"- {text}" for text in notes]
+    write_summary(summary)
+    return blocking
+
+
 # --- Befehle ---------------------------------------------------------------------------------
 
 def cmd_build(args):
@@ -876,6 +1192,180 @@ def cmd_notify_discord(args):
     log("Release im Discord angekündigt")
 
 
+def cmd_fetch_mods(args):
+    if not (PACK_DIR / "pack.toml").exists():
+        fail("build/pack fehlt, vorher assemble oder build ausführen")
+    jobs = {}
+    for path in metadata_files(PACK_DIR):
+        rel = path.relative_to(PACK_DIR)
+        meta = read_metadata(path)
+        if not meta["filename"]:
+            warn(f"{rel.as_posix()} nennt keine Datei und wird nicht gescannt")
+            continue
+        if hash_matches(b"", meta) is None:
+            warn(f"{rel.as_posix()}: Prüfsumme ({meta['hash_format']}) lässt sich nicht prüfen")
+        jobs[SCAN_FILES_DIR / rel.parent / meta["filename"]] = (rel.as_posix(), meta)
+
+    log(f"Lade {len(jobs)} Dateien aus den Metadaten nach {SCAN_FILES_DIR.relative_to(ROOT)}")
+    results, errors = {}, []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(fetch_scan_file, meta, dest): (dest, rel) for dest, (rel, meta) in jobs.items()}
+        for future in concurrent.futures.as_completed(futures):
+            dest, rel = futures[future]
+            try:
+                results[dest] = future.result()
+            except (ValueError, urllib.error.URLError, OSError, subprocess.CalledProcessError) as error:
+                errors.append(f"{rel}: {describe_error(error)}")
+
+    # Dateien, die nicht mehr im Pack sind, fliegen raus, damit Scan und Cache nur den aktuellen Stand sehen
+    if SCAN_FILES_DIR.exists():
+        for path in sorted(SCAN_FILES_DIR.rglob("*"), reverse=True):
+            if path.is_file() and path not in jobs:
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+
+    if errors:
+        fail(f"{len(errors)} Dateien konnten nicht geprüft geladen werden:\n" + "\n".join(sorted(errors)))
+
+    index = [
+        {
+            "file": dest.relative_to(ROOT).as_posix(),
+            "name": meta["name"],
+            "overlay": (OVERLAY_DIR / rel).exists(),
+            "sha256": results[dest][1],
+        }
+        for dest, (rel, meta) in sorted(jobs.items())
+    ]
+    # Jars, die Craftoria direkt mitbringt (z. B. InstanceSync.jar), führen Launcher oder Server ebenfalls aus
+    for jar in sorted(PACK_DIR.rglob("*.jar")):
+        rel = jar.relative_to(PACK_DIR)
+        index.append({
+            "file": jar.relative_to(ROOT).as_posix(),
+            "name": rel.as_posix(),
+            "overlay": (OVERLAY_DIR / rel).exists(),
+            "sha256": sha256_of(jar),
+        })
+    save_json(SCAN_INDEX, index)
+    loaded = sum(1 for origin, _ in results.values() if origin == "geladen")
+    log(f"Fertig: {loaded} geladen, {len(results) - loaded} aus dem Cache, alle Prüfsummen stimmen")
+
+
+def cmd_scan_clamav(args):
+    index = {entry["file"]: entry for entry in scan_index()}
+    allowed = load_allowlist()
+    # SHA-256 -> Datum aller Dateien, die schon einmal sauber waren. Builds scannen nur, was dort fehlt, also meist
+    # nur neue Jars. --full (der nächtliche Lauf) scannt alles mit den aktuellen Signaturen und baut die Liste neu
+    # auf, eine Datei mit Fund fliegt damit raus und wird ab dann bei jedem Build wieder gescannt.
+    clean = {} if args.full or not CLAMAV_CACHE.exists() else load_json(CLAMAV_CACHE)
+
+    # Die zu scannenden Dateien kommen als Hardlinks in ein eigenes Verzeichnis, durch das clamd parallel läuft
+    if CLAMAV_TODO_DIR.exists():
+        shutil.rmtree(CLAMAV_TODO_DIR)
+    todo, total = {}, 0
+    for name, root in {"pack": PACK_DIR, "files": SCAN_FILES_DIR}.items():
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            total += 1
+            rel = path.relative_to(ROOT).as_posix()
+            sha = index[rel]["sha256"] if rel in index else sha256_of(path)
+            if sha in clean:
+                continue
+            link = CLAMAV_TODO_DIR / name / path.relative_to(root)
+            link.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.link(path, link)
+            except OSError:
+                shutil.copy2(path, link)
+            todo[link] = (path, sha)
+
+    if not todo:
+        result = f"alle {total} Dateien waren schon sauber, nichts Neues zu scannen"
+    else:
+        scope = "mit aktuellen Signaturen" if args.full else f"der Rest ({total - len(todo)}) war schon sauber"
+        if shutil.which("docker"):
+            cmd = ["docker", "run", "--rm", "--entrypoint", "sh", "--volume", f"{CLAMAV_TODO_DIR}:/scan:ro",
+                   CLAMAV_IMAGE, "-c", CLAMAV_SCRIPT, "sh", "/scan"]
+            log(f"Scanne {len(todo)} von {total} Dateien mit {CLAMAV_IMAGE}, {scope}")
+        elif shutil.which("clamscan"):
+            cmd = ["clamscan", *CLAMSCAN_OPTIONS, CLAMAV_TODO_DIR]
+            log(f"Scanne {len(todo)} von {total} Dateien mit dem installierten clamscan, {scope}")
+        else:
+            fail("Der ClamAV-Scan braucht Docker oder clamscan im PATH")
+
+        def original(path):
+            link = CLAMAV_TODO_DIR / path[len("/scan/"):] if path.startswith("/scan/") else Path(path)
+            return todo.get(link, (link, None))
+
+        process = subprocess.Popen(
+            [str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace",
+        )
+        hits = []
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            line = line.rstrip("\r\n")
+            if line == CLAMAV_FRESHCLAM_FAILED:
+                warn("freshclam konnte die Signaturen nicht aktualisieren, gescannt wird mit denen aus dem Image")
+            match = re.match(r"^(.+?): (.+) FOUND$", line)
+            if match:
+                hits.append((*original(match.group(1)), match.group(2)))
+        code = process.wait()
+        shutil.rmtree(CLAMAV_TODO_DIR)
+
+        blocking = []
+        for path, sha, signature in hits:
+            rel = path.relative_to(ROOT).as_posix() if path.is_relative_to(ROOT) else str(path)
+            label = f"{index[rel]['name']} (`{rel}`)" if rel in index else f"`{rel}`"
+            if sha in allowed:
+                log(f"Freigegeben in {SCAN_ALLOWLIST.name}: {rel} ({signature})")
+            else:
+                blocking.append(f"{label}: {signature}, SHA-256 {sha}")
+        # Bei einem Fehler weiß man nicht, welche Dateien wirklich gescannt wurden, dann bleibt die Liste, wie sie war
+        if code in (0, 1) and (code == 0 or hits):
+            today = datetime.now(timezone.utc).date().isoformat()
+            hit_shas = {sha for _, sha, _ in hits}
+            clean.update({sha: today for _, sha in todo.values() if sha not in hit_shas})
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
+        save_json(CLAMAV_CACHE, clean)
+
+        if blocking:
+            write_summary(["### ClamAV", "**Funde:**"] + [f"- {text}" for text in blocking])
+            fail(f"ClamAV hat {len(blocking)} verdächtige Dateien gefunden:\n" + "\n".join(blocking))
+        if code == 1 and not hits:
+            fail("ClamAV meldet Funde, die sich keiner Datei zuordnen lassen, siehe Ausgabe oben")
+        if code not in (0, 1):
+            fail(f"ClamAV ist mit Code {code} abgebrochen, siehe Ausgabe oben")
+        result = f"{len(todo)} Dateien gescannt, " + (
+            f"nur in {SCAN_ALLOWLIST.name} freigegebene Funde" if hits else "keine Funde"
+        )
+    write_summary(["### ClamAV", result[0].upper() + result[1:] + "."])
+    log(f"ClamAV: {result}")
+
+
+def cmd_scan_virustotal(args):
+    jars = [entry for entry in scan_index() if entry["file"].endswith(".jar")]
+    allowed = load_allowlist()
+    cache = load_json(VIRUSTOTAL_CACHE) if VIRUSTOTAL_CACHE.exists() else {}
+    key = os.environ.get("VIRUSTOTAL_API_KEY", "").strip()
+    try:
+        if not key:
+            warn("VIRUSTOTAL_API_KEY ist nicht gesetzt, VirusTotal prüft keine neuen Jars")
+        else:
+            log(f"Prüfe neue Jars bei VirusTotal (Zeitbudget {args.minutes:g} min)")
+            virustotal_check(VirusTotal(key, time.monotonic() + args.minutes * 60), jars, cache)
+    except VirusTotalStop as stop:
+        log(f"VirusTotal: {stop}, der Rest folgt im nächsten Lauf")
+    finally:
+        # Auch bei Abbruch speichern, sonst wären die Anfragen dieses Laufs verloren
+        SCAN_DIR.mkdir(parents=True, exist_ok=True)
+        save_json(VIRUSTOTAL_CACHE, cache)
+
+    blocking = virustotal_report(jars, cache, allowed)
+    if blocking:
+        fail(f"VirusTotal meldet {len(blocking)} Jars als Malware:\n" + "\n".join(blocking))
+
+
 def main():
     # packwiz-Argumente unverändert durchreichen, argparse würde sich an deren Flags verschlucken
     if len(sys.argv) > 1 and sys.argv[1] == "packwiz":
@@ -894,6 +1384,11 @@ def main():
     commands.add_parser("notify-discord", help="zuletzt gebautes Release im Discord ankündigen")
     test_server = commands.add_parser("test-server", help="Server aus dist/ installieren, starten und stoppen")
     test_server.add_argument("--timeout", type=float, default=40, help="Minuten bis zum fertigen Start (Standard 40)")
+    commands.add_parser("fetch-mods", help="alle Dateien aus den Metadaten zum Scannen laden")
+    clamav = commands.add_parser("scan-clamav", help="neue Dateien aus Pack und Downloads mit ClamAV scannen")
+    clamav.add_argument("--full", action="store_true", help="alle Dateien scannen, auch die schon sauberen")
+    virustotal = commands.add_parser("scan-virustotal", help="Jars bei VirusTotal prüfen")
+    virustotal.add_argument("--minutes", type=float, default=15, help="Zeitbudget für Anfragen (Standard 15)")
     args = parser.parse_args()
 
     handlers = {
@@ -902,6 +1397,9 @@ def main():
         "check-upstream": cmd_check_upstream,
         "notify-discord": cmd_notify_discord,
         "test-server": cmd_test_server,
+        "fetch-mods": cmd_fetch_mods,
+        "scan-clamav": cmd_scan_clamav,
+        "scan-virustotal": cmd_scan_virustotal,
     }
     run_guarded(handlers[args.command], args)
 

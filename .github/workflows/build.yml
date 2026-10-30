@@ -2,7 +2,8 @@ name: Build
 
 # Releases nur per Hand: Actions → Build → Run workflow auf main.
 # Pushes, PRs und Läufe auf anderen Branches bauen nur und hängen die ZIPs als Artefakt an.
-# Jeder Lauf startet den Server einmal zur Probe, ein Release gibt es nur, wenn er dabei hochkommt.
+# Jeder Lauf startet den Server einmal zur Probe und scannt parallel alle Mods auf Malware (scan.yml).
+# Ein Release gibt es nur, wenn beides klappt.
 on:
   push:
     branches: [main]
@@ -25,6 +26,9 @@ jobs:
     timeout-minutes: 60
     env:
       IS_RELEASE: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    outputs:
+      name: ${{ steps.build.outputs.name }}
+      version: ${{ steps.build.outputs.version }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -51,6 +55,14 @@ jobs:
           name: ${{ steps.build.outputs.name }}-${{ steps.build.outputs.version }}
           path: dist/
 
+      - name: Upload Discord message
+        if: env.IS_RELEASE == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: discord-payload
+          path: build/discord-payload.json
+          retention-days: 7
+
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -71,12 +83,35 @@ jobs:
             build/test-server/installer.jar.log
           if-no-files-found: ignore
 
+  scan:
+    uses: ./.github/workflows/scan.yml
+    secrets: inherit
+
+  release:
+    needs: [build, scan]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download build output
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.name }}-${{ needs.build.outputs.version }}
+          path: dist/
+
+      - name: Download Discord message
+        uses: actions/download-artifact@v4
+        with:
+          name: discord-payload
+          path: build/
+
       - name: Create GitHub release
-        if: env.IS_RELEASE == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.build.outputs.version }}
-          NAME: ${{ steps.build.outputs.name }}
+          VERSION: ${{ needs.build.outputs.version }}
+          NAME: ${{ needs.build.outputs.name }}
         run: |
           gh release create "$VERSION" dist/*.zip \
             --target "$GITHUB_SHA" \
@@ -84,7 +119,6 @@ jobs:
             --notes-file dist/release-notes.md
 
       - name: Announce release on Discord
-        if: env.IS_RELEASE == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python3 scripts/cozytoria.py notify-discord
