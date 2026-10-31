@@ -1,0 +1,16 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "pattern": [
+    "aa",
+    "aa"
+  ],
+  "key": {
+    "a": {
+      "tag": "c:nuggets/iron"
+    }
+  },
+  "result": {
+    "id": "mts:mtsofficialpack.screws",
+    "count": 4
+  }
+}
