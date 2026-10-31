@@ -12,6 +12,7 @@
   fetch-mods          Alle Dateien aus den Metadaten in build/pack nach build/scan/files laden und Prüfsummen prüfen
   scan-clamav         Neue Dateien aus build/pack und build/scan/files mit ClamAV scannen (braucht Docker oder
                       clamscan), --full scannt alle mit den aktuellen Signaturen
+  check-recipes       Rezepte unserer Mods und Overrides gegen alle anderen auf Konflikte prüfen (nach fetch-mods)
 
 Braucht nur Python 3.9+ und git, packwiz wird automatisch heruntergeladen.
 """
@@ -58,6 +59,8 @@ REMOVE_FILE = ROOT / "remove.txt"
 CONFIG_FILE = ROOT / "cozytoria.json"
 LOCK_FILE = ROOT / "upstream.json"
 SCAN_ALLOWLIST = ROOT / "scan-allowlist.txt"
+RECIPE_ALLOWLIST = ROOT / "recipe-allowlist.txt"
+RECIPE_BASE_DIR = BUILD / "recipes"
 
 # Der packwiz-Fork, mit dem auch Craftoria gebaut wird. Er schreibt für jede Mod eine
 # downloadUrl in die manifest.json, ohne die der TeamAOF-ServerStarter nichts laden kann.
@@ -111,7 +114,20 @@ exit $code
 CLAMSCAN_OPTIONS = ["--recursive", "--infected", "--max-filesize=1024M", "--max-scansize=4096M",
                     "--max-files=200000", "--max-recursion=32", "--scan-html=no"]
 
-IN_CI = os.environ.get("GITHUB_ACTIONS") == "true"
+MOJANG_VERSION_MANIFEST = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
+NEOFORGE_MAVEN = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
+RECIPE_FILE = re.compile(r"^data/([^/]+)/recipe/(.+)\.json$")
+ITEM_TAG_FILE = re.compile(r"^data/([^/]+)/tags/items?/(.+)\.json$")
+MOD_ID = re.compile(r'^\s*modId\s*=\s*"([^"]+)"', re.M)
+# Jars in Jars: mitgelieferte Mods und der eigentliche Server im Bundler-Jar von Mojang
+NESTED_JAR_DIRS = ("META-INF/jarjar/", "META-INF/versions/")
+COOKING_TYPES = ("minecraft:smelting", "minecraft:blasting", "minecraft:smoking", "minecraft:campfire_cooking")
+# Rezepte mit Muster oder Zutatenliste, die nicht in der Werkbank laufen, sondern an einer eigenen Station. Sie werden
+# nur mit Rezepten desselben Typs verglichen, alles andere mit Muster oder „shapeless“ im Typ gilt als Werkbank.
+OTHER_CRAFTING_STATIONS = ("create:mechanical_crafting", "spectrum:pedestal", "extendedcrafting:", "avaritia:",
+                           "twilightforest:uncrafting")
+
+IN_CI =os.environ.get("GITHUB_ACTIONS") == "true"
 warnings = []
 curl_fallback_logged = False
 
@@ -804,6 +820,291 @@ def write_summary(lines):
             f.write("\n".join(lines) + "\n\n")
 
 
+# --- Rezeptkonflikte -------------------------------------------------------------------------
+
+def cached_download(url, dest, algorithm, digest):
+    if dest.exists() and hashlib.new(algorithm, dest.read_bytes()).hexdigest() == digest:
+        return dest
+    log(f"Lade {url}")
+    data = download_with_retry(url)
+    if hashlib.new(algorithm, data).hexdigest() != digest:
+        fail(f"Prüfsumme passt nicht, die Datei von {url} wurde verändert")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
+    return dest
+
+
+def base_jars():
+    # Vanilla-Rezepte und -Tags stecken im Server von Mojang, die c:-Tags in NeoForge. Beide in den Versionen aus
+    # pack.toml, liegen danach in build/recipes und werden nur bei neuen Versionen wieder geladen.
+    versions = dict(re.findall(r'^(minecraft|neoforge)\s*=\s*"([^"]+)"', read_text(PACK_DIR / "pack.toml"), re.M))
+    if "minecraft" not in versions or "neoforge" not in versions:
+        fail("build/pack/pack.toml nennt keine Minecraft- oder NeoForge-Version")
+    minecraft, neoforge = versions["minecraft"], versions["neoforge"]
+    manifest = json.loads(download_with_retry(MOJANG_VERSION_MANIFEST))
+    entry = next((v for v in manifest["versions"] if v["id"] == minecraft), None)
+    if not entry:
+        fail(f"Minecraft {minecraft} fehlt im Versions-Manifest von Mojang")
+    server = json.loads(download_with_retry(entry["url"]))["downloads"]["server"]
+    neoforge_url = f"{NEOFORGE_MAVEN}/{neoforge}/neoforge-{neoforge}-universal.jar"
+    neoforge_sha = download_with_retry(neoforge_url + ".sha256").decode().split()[0]
+    jars = {
+        "Minecraft": cached_download(server["url"], RECIPE_BASE_DIR / f"minecraft-server-{minecraft}.jar",
+                                     "sha1", server["sha1"]),
+        "NeoForge": cached_download(neoforge_url, RECIPE_BASE_DIR / f"neoforge-{neoforge}-universal.jar",
+                                    "sha256", neoforge_sha),
+    }
+    for path in RECIPE_BASE_DIR.iterdir():
+        if path not in jars.values():
+            path.unlink()
+    return jars
+
+
+class Recipe:
+    def __init__(self, recipe_id, source, ours, group, cells, result, grids=None, ordered=False):
+        self.id, self.source, self.ours, self.group = recipe_id, source, ours, group
+        # Zutaten als Mengen von Items, bei Mustern zusätzlich das Raster (None = leeres Feld) samt Spiegelung
+        self.cells, self.grids, self.ordered = cells, grids, ordered
+        self.result = result
+
+
+class RecipeData:
+    """Rezepte und Item-Tags aus Jars und Datapacks, so wie der Server sie lädt. KubeJS-Skripte führen wir nicht aus."""
+
+    def __init__(self):
+        self.namespaces = {"minecraft"}
+        self.tags = {}
+        self.recipes = {}
+        self.tag_cache = {}
+        self.unified = {}
+
+    def read_zip(self, archive, source, ours):
+        for name in archive.namelist():
+            if name.startswith(NESTED_JAR_DIRS) and name.endswith(".jar"):
+                try:
+                    self.read_zip(zipfile.ZipFile(io.BytesIO(archive.read(name))), source, ours)
+                except zipfile.BadZipFile:
+                    pass
+            elif name in ("META-INF/neoforge.mods.toml", "META-INF/mods.toml"):
+                self.namespaces.update(MOD_ID.findall(archive.read(name).decode("utf-8", "replace")))
+            elif RECIPE_FILE.match(name) or ITEM_TAG_FILE.match(name):
+                self.add(name, archive.read(name), source, ours)
+
+    def read_dir(self, data_dir, source, ours):
+        # source und ours sind Funktionen des Pfads, in kubejs/data liegen Dateien von Craftoria und von uns
+        for path in sorted(data_dir.rglob("*.json")):
+            self.add(path.relative_to(data_dir.parent).as_posix(), path.read_bytes(), source(path), ours(path))
+
+    def add(self, name, raw, source, ours):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return
+        if not isinstance(data, dict):
+            return
+        tag, recipe = ITEM_TAG_FILE.match(name), RECIPE_FILE.match(name)
+        if tag:
+            entries = self.tags.setdefault(f"{tag[1]}:{tag[2]}", set())
+            entries.update(v["id"] if isinstance(v, dict) else v for v in data.get("values", []))
+        elif recipe:
+            # Wie bei Datapacks ersetzt eine später geladene Datei mit derselben ID die frühere
+            self.recipes[f"{recipe[1]}:{recipe[2]}"] = (source, data, ours)
+
+    def exists(self, item):
+        return item.split(":", 1)[0] in self.namespaces
+
+    def tag_items(self, tag, seen=()):
+        if tag in seen:
+            return set()
+        if tag not in self.tag_cache:
+            items = set()
+            for entry in self.tags.get(tag, ()):
+                if entry.startswith("#"):
+                    items |= self.tag_items(entry[1:], seen + (tag,))
+                elif self.exists(entry):
+                    items.add(entry)
+            self.tag_cache[tag] = items
+        return self.tag_cache[tag]
+
+    def unify(self, patterns):
+        # Almost Unified macht aus allen Items eines Tags wie c:ingots/copper eines, im Vergleich zählen sie gleich
+        regexes = [re.compile("^" + "[^/]+".join(map(re.escape, p.split("{material}"))) + "$") for p in patterns]
+        for tag in list(self.tags):
+            if any(regex.match(tag) for regex in regexes):
+                items = sorted(self.tag_items(tag))
+                for item in items:
+                    self.unified.setdefault(item, self.unified.get(items[0], items[0]))
+
+    def holders(self, value):
+        if isinstance(value, list):
+            return set().union(*(self.holders(v) for v in value))
+        if value.startswith("#"):
+            return set(self.tag_items(value[1:]))
+        return {value} if self.exists(value) else set()
+
+    def ingredient(self, data):
+        # Items einer Zutat, None bei eigenen Zutat-Typen von Mods, die sich ohne das Spiel nicht auswerten lassen
+        if isinstance(data, list):
+            parts = [self.ingredient(d) for d in data]
+            return None if None in parts else set().union(*parts)
+        if isinstance(data, str):
+            return self.holders(data)
+        if not isinstance(data, dict):
+            return None
+        kind = data.get("type")
+        if kind in (None, "minecraft:item", "minecraft:tag"):
+            if "item" in data:
+                return {data["item"]} if self.exists(data["item"]) else set()
+            return set(self.tag_items(data["tag"])) if "tag" in data else None
+        if kind == "neoforge:compound":
+            return self.ingredient(data.get("children", []))
+        if kind == "neoforge:difference":
+            base, subtracted = self.ingredient(data.get("base")), self.ingredient(data.get("subtracted"))
+            return None if base is None or subtracted is None else base - subtracted
+        if kind == "neoforge:intersection":
+            parts = [self.ingredient(c) for c in data.get("children", [])]
+            return None if not parts or None in parts else set.intersection(*parts)
+        if kind == "neoforge:components":
+            return self.holders(data.get("items", []))
+        return None
+
+    def condition(self, data):
+        kind = data.get("type")
+        if kind == "neoforge:mod_loaded":
+            return data.get("modid") in self.namespaces
+        if kind == "neoforge:item_exists":
+            return self.exists(data.get("item", ""))
+        if kind == "neoforge:tag_empty":
+            return not self.tag_items(data.get("tag", ""))
+        if kind == "neoforge:not":
+            return not self.condition(data.get("value", {}))
+        if kind == "neoforge:and":
+            return all(self.condition(v) for v in data.get("values", []))
+        if kind == "neoforge:or":
+            return any(self.condition(v) for v in data.get("values", []))
+        return kind != "neoforge:false"
+
+    def comparable(self):
+        # Liefert alle vergleichbaren Rezepte und die IDs unserer Rezepte, die sich nicht auswerten lassen
+        recipes, unknown = [], []
+        for recipe_id, (source, data, ours) in self.recipes.items():
+            if not all(self.condition(c) for c in data.get("neoforge:conditions", [])):
+                continue
+            kind = data.get("type", "")
+            if ":" not in kind:
+                kind = "minecraft:" + kind
+            shaped = "pattern" in data and "key" in data
+            if kind in COOKING_TYPES:
+                group, raw, ordered = kind, [data.get("ingredient")], True
+            elif kind == "minecraft:smithing_transform":
+                group, raw, ordered = kind, [data.get("template"), data.get("base"), data.get("addition")], True
+            elif shaped or ("shapeless" in kind and isinstance(data.get("ingredients"), list)):
+                group = kind if kind.startswith(OTHER_CRAFTING_STATIONS) else "crafting"
+                raw, ordered = (data["key"] if shaped else data["ingredients"]), False
+            else:
+                continue
+
+            result = data.get("result")
+            result = {"id": result} if isinstance(result, str) else result if isinstance(result, dict) else {}
+            result_item = result.get("id") or result.get("item")
+            if result_item and not self.exists(result_item):
+                continue
+            result = (self.unified.get(result_item, result_item), result.get("count", 1)) if result_item else None
+
+            values = raw.values() if isinstance(raw, dict) else raw
+            items = [self.ingredient(v) for v in values]
+            if None in items:
+                if ours:
+                    unknown.append(recipe_id)
+                continue
+            # Ein Item, das es nicht gibt, oder ein leerer Tag: Das Rezept lädt nicht oder passt nie
+            if not items or not all(items):
+                continue
+            items = [frozenset(self.unified.get(i, i) for i in item) for item in items]
+            if shaped:
+                grid = self.grid(data["pattern"], dict(zip(raw, items)))
+                if grid is None:
+                    continue
+                cells = [cell for row in grid for cell in row if cell is not None]
+                mirrored = tuple(tuple(reversed(row)) for row in grid)
+                grids = [grid] if data.get("accept_mirrored") is False else [grid, mirrored]
+                recipes.append(Recipe(recipe_id, source, ours, group, cells, result, grids=grids))
+            else:
+                recipes.append(Recipe(recipe_id, source, ours, group, items, result, ordered=ordered))
+        return recipes, unknown
+
+    @staticmethod
+    def grid(pattern, keys):
+        # Muster ohne leere Ränder, wie das Spiel es vergleicht: "#V " und "V# " passt auch als 2×2 in jede Ecke
+        rows = [row for row in pattern if isinstance(row, str)]
+        while rows and not rows[0].strip():
+            rows.pop(0)
+        while rows and not rows[-1].strip():
+            rows.pop()
+        if not rows:
+            return None
+        width = max(len(row) for row in rows)
+        rows = [row.ljust(width) for row in rows]
+        used = [i for i in range(width) if any(row[i] != " " for row in rows)]
+        try:
+            return tuple(tuple(None if c == " " else keys[c] for c in row[used[0]:used[-1] + 1]) for row in rows)
+        except KeyError:
+            return None
+
+
+def grids_overlap(first, second):
+    if len(first) != len(second) or len(first[0]) != len(second[0]):
+        return False
+    return all((a is None) == (b is None) and (a is None or a & b)
+               for row_a, row_b in zip(first, second) for a, b in zip(row_a, row_b))
+
+
+def perfect_matching(first, second):
+    # Lässt sich jede Zutat des einen Rezepts einer eigenen Zutat des anderen zuordnen, die dasselbe Item annimmt?
+    matched = [-1] * len(second)
+
+    def assign(i, seen):
+        for j, cell in enumerate(second):
+            if j not in seen and first[i] & cell:
+                seen.add(j)
+                if matched[j] < 0 or assign(matched[j], seen):
+                    matched[j] = i
+                    return True
+        return False
+
+    return all(assign(i, set()) for i in range(len(first)))
+
+
+def recipes_collide(a, b):
+    # Gibt es eine Belegung, die beide Rezepte annehmen? Formlose Rezepte passen auf jede Anordnung ihrer Zutaten.
+    if len(a.cells) != len(b.cells):
+        return False
+    if a.grids and b.grids:
+        return any(grids_overlap(a.grids[0], grid) for grid in b.grids)
+    if a.ordered or b.ordered:
+        return all(x & y for x, y in zip(a.cells, b.cells))
+    return perfect_matching(a.cells, b.cells)
+
+
+def load_recipe_allowlist():
+    allowed = set()
+    if not RECIPE_ALLOWLIST.exists():
+        return allowed
+    for number, line in enumerate(read_text(RECIPE_ALLOWLIST).splitlines(), 1):
+        ids = line.split("#", 1)[0].split()
+        if not ids:
+            continue
+        if len(ids) != 2:
+            fail(f"{RECIPE_ALLOWLIST.name}, Zeile {number}: zwei Rezept-IDs erwartet")
+        allowed.add(frozenset(ids))
+    return allowed
+
+
+def describe_recipe(recipe):
+    result = f"{recipe.result[1]}x {recipe.result[0]}" if recipe.result else "?"
+    return f"`{recipe.id}` aus {recipe.source} → {result}"
+
+
 # --- Befehle ---------------------------------------------------------------------------------
 
 def cmd_build(args):
@@ -1224,6 +1525,99 @@ def cmd_scan_clamav(args):
     set_output("result", result)
 
 
+def cmd_check_recipes(args):
+    if not (PACK_DIR / "pack.toml").exists():
+        fail("build/pack fehlt, vorher assemble oder build ausführen")
+    index = scan_index()
+    data = RecipeData()
+    for name, jar in base_jars().items():
+        data.read_zip(zipfile.ZipFile(jar), name, False)
+
+    # Client-only Mods laufen nicht auf dem Server, ihre Rezepte gibt es im Spiel nicht
+    pack_meta = [read_metadata(path) for path in metadata_files(PACK_DIR)]
+    client_only = {meta["filename"] for meta in pack_meta if meta["side"] == "client"}
+    ours = {read_metadata(path)["filename"] for path in metadata_files(OVERLAY_DIR)}
+    jars = [ROOT / entry["file"] for entry in index]
+    names = {ROOT / entry["file"]: entry["name"] for entry in index}
+    jars = [p for p in jars if p.parent == SCAN_FILES_DIR / "mods" and p.suffix == ".jar" and p.name not in client_only]
+    log(f"Lese Rezepte und Tags aus Minecraft, NeoForge und {len(jars)} Mods")
+    for path in jars:
+        try:
+            data.read_zip(zipfile.ZipFile(path), names[path], path.name in ours)
+        except zipfile.BadZipFile:
+            warn(f"{path.relative_to(ROOT)} ist kein gültiges Jar und wird bei den Rezepten übersprungen")
+
+    def from_overlay(path):
+        return (OVERLAY_DIR / path.relative_to(PACK_DIR)).exists()
+
+    def pack_file(path):
+        rel = path.relative_to(PACK_DIR).as_posix()
+        return f"overlay/{rel}" if from_overlay(path) else f"Craftorias {rel}"
+
+    # Datapacks, die Craftoria über OpenLoader lädt, und zuletzt kubejs/data, das über allen anderen liegt
+    for pack in sorted((PACK_DIR / "config/openloader/packs").glob("*")):
+        if pack.suffix == ".zip":
+            data.read_zip(zipfile.ZipFile(pack), f"OpenLoader-Pack {pack.name}", False)
+        elif (pack / "data").is_dir():
+            data.read_dir(pack / "data", pack_file, from_overlay)
+    if (PACK_DIR / "kubejs/data").is_dir():
+        data.read_dir(PACK_DIR / "kubejs/data", pack_file, from_overlay)
+    # Mit KubeJS erzeugte Items (z. B. craftoria:*) gibt es auch, ihre Texturen liegen in kubejs/assets
+    if (PACK_DIR / "kubejs/assets").is_dir():
+        data.namespaces.update(path.name for path in (PACK_DIR / "kubejs/assets").iterdir() if path.is_dir())
+    for config in sorted((PACK_DIR / "config/almostunified/unification").glob("*.json")):
+        try:
+            data.unify(load_json(config).get("tags", []))
+        except ValueError:
+            warn(f"{config.relative_to(ROOT)} lässt sich nicht lesen, Almost Unified bleibt beim Vergleich außen vor")
+
+    recipes, unknown = data.comparable()
+    if unknown:
+        warn(f"{len(unknown)} Rezepte aus unseren Mods nutzen eigene Zutat-Typen und lassen sich nicht prüfen: "
+             + ", ".join(sorted(unknown)))
+    candidates = {}
+    for recipe in recipes:
+        candidates.setdefault((recipe.group, len(recipe.cells)), []).append(recipe)
+
+    allowed, used, seen, conflicts = load_recipe_allowlist(), set(), set(), {}
+    checked = [recipe for recipe in recipes if recipe.ours]
+    for recipe in checked:
+        for other in candidates[(recipe.group, len(recipe.cells))]:
+            pair = frozenset((recipe.id, other.id))
+            if other is recipe or pair in seen or not recipes_collide(recipe, other):
+                continue
+            seen.add(pair)
+            # Beide ergeben dasselbe Item: Für Spieler macht es keinen Unterschied, welches Rezept greift
+            if recipe.result and other.result and recipe.result[0] == other.result[0]:
+                continue
+            if pair in allowed:
+                used.add(pair)
+                log(f"Freigegeben in {RECIPE_ALLOWLIST.name}: {recipe.id} und {other.id}")
+                continue
+            conflicts.setdefault(recipe, []).append(other)
+    for pair in sorted(allowed - used, key=sorted):
+        warn(f"{' und '.join(sorted(pair))} kollidieren nicht mehr, der Eintrag in {RECIPE_ALLOWLIST.name} kann raus")
+
+    if conflicts:
+        lines = []
+        for recipe, others in conflicts.items():
+            station = "Werkbank" if recipe.group == "crafting" else recipe.group
+            namespace, path = recipe.id.split(":", 1)
+            lines.append(f"- {station}: {describe_recipe(recipe)}")
+            lines += [f"  - kollidiert mit {describe_recipe(other)}" for other in others[:5]]
+            if len(others) > 5:
+                lines.append(f"  - und {len(others) - 5} weiteren")
+            lines.append(f"  - Lösung: `overlay/kubejs/data/{namespace}/recipe/{path}.json` mit anderem Muster anlegen")
+        hint = (f"Siehe README unter „Rezeptkonflikte“. Ist eine Überschneidung gewollt, beide IDs in "
+                f"{RECIPE_ALLOWLIST.name} eintragen.")
+        write_summary(["### Rezeptkonflikte"] + lines + ["", hint])
+        fail(f"{len(conflicts)} Rezepte aus unseren Mods kollidieren mit anderen:\n" + "\n".join(lines) + "\n" + hint)
+
+    result = f"keine Konflikte, {len(checked)} Rezepte aus unseren Mods gegen alle {len(recipes)} geprüft"
+    write_summary(["### Rezeptkonflikte", result[0].upper() + result[1:] + "."])
+    log(f"Rezeptkonflikte: {result}")
+
+
 def main():
     # packwiz-Argumente unverändert durchreichen, argparse würde sich an deren Flags verschlucken
     if len(sys.argv) > 1 and sys.argv[1] == "packwiz":
@@ -1245,6 +1639,7 @@ def main():
     commands.add_parser("fetch-mods", help="alle Dateien aus den Metadaten zum Scannen laden")
     clamav = commands.add_parser("scan-clamav", help="neue Dateien aus Pack und Downloads mit ClamAV scannen")
     clamav.add_argument("--full", action="store_true", help="alle Dateien scannen, auch die schon sauberen")
+    commands.add_parser("check-recipes", help="Rezepte unserer Mods auf Konflikte mit dem restlichen Pack prüfen")
     args = parser.parse_args()
 
     handlers = {
@@ -1255,6 +1650,7 @@ def main():
         "test-server": cmd_test_server,
         "fetch-mods": cmd_fetch_mods,
         "scan-clamav": cmd_scan_clamav,
+        "check-recipes": cmd_check_recipes,
     }
     run_guarded(handlers[args.command], args)
 

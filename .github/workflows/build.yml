@@ -2,8 +2,8 @@ name: Build
 
 # Releases nur per Hand: Actions → Build → Run workflow auf main.
 # Pushes, PRs und Läufe auf anderen Branches bauen nur und hängen die ZIPs als Artefakt an.
-# Jeder Lauf startet den Server einmal zur Probe und scannt parallel neue Mods auf Malware (scan.yml).
-# Ein Release gibt es nur, wenn beides klappt.
+# Jeder Lauf startet den Server einmal zur Probe, scannt parallel neue Mods auf Malware (scan.yml) und prüft die
+# Rezepte unserer Mods auf Konflikte. Ein Release gibt es nur, wenn alles klappt.
 on:
   push:
     branches: [main]
@@ -93,8 +93,48 @@ jobs:
     with:
       full-scan: ${{ inputs.full-scan || false }}
 
+  recipes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Gespeichert werden die beiden Caches vom Build- und vom Scan-Job, die dieselben Schlüssel nutzen
+      - name: Restore packwiz cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/tools
+            build/cache
+          key: packwiz-${{ hashFiles('upstream.json', 'overlay/**/*.pw.toml') }}
+          restore-keys: packwiz-
+
+      - name: Assemble pack
+        run: python3 scripts/cozytoria.py assemble
+
+      - name: Restore downloaded mods
+        uses: actions/cache/restore@v4
+        with:
+          path: build/scan/files
+          key: scan-files-${{ hashFiles('upstream.json', 'overlay/**/*.pw.toml', 'remove.txt') }}
+          restore-keys: scan-files-
+
+      - name: Download all mods
+        run: python3 scripts/cozytoria.py fetch-mods
+
+      - name: Cache Minecraft and NeoForge
+        uses: actions/cache@v4
+        with:
+          path: build/recipes
+          key: recipes-base-${{ hashFiles('upstream.json') }}
+          restore-keys: recipes-base-
+
+      - name: Check recipe conflicts
+        run: python3 scripts/cozytoria.py check-recipes
+
   release:
-    needs: [build, scan]
+    needs: [build, scan, recipes]
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:

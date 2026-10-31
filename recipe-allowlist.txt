@@ -1,0 +1,5 @@
+# Gewollte oder geprüfte Überschneidungen für den Rezept-Check, siehe README unter „Rezeptkonflikte“.
+# Ein Paar pro Zeile: zwei Rezept-IDs, dahinter als Kommentar die Begründung, z. B. weil Craftoria den Konflikt
+# schon per KubeJS-Skript löst (die führt der Check nicht aus).
+#
+# beispielmod:zahnrad  andermod:platte  # Craftoria entfernt andermod:platte in removals.js

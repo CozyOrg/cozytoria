@@ -39,10 +39,12 @@ upstream.json      Craftoria-Commit, auf dem wir aufbauen (pflegt der Upstream-W
 overlay/           Dateien, die über Craftoria gelegt werden (gleiche Ordnerstruktur wie Craftoria)
   mods/*.pw.toml   unsere zusätzlichen Mods als packwiz-Metadaten
   config/ …        eigene oder komplett ersetzte Configs
+  kubejs/data/ …   Rezepte, die Mod-Rezepte mit derselben ID ersetzen (z. B. bei Rezeptkonflikten)
   server_files/ …  z. B. eigenes server-icon.png
 patches/*.patch    gezielte Änderungen an Craftoria-Dateien
 remove.txt         Craftoria-Dateien, die rausfliegen
 scan-allowlist.txt geprüfte Fehlalarme des Malware-Scans
+recipe-allowlist.txt gewollte Überschneidungen beim Rezept-Check
 scripts/cozytoria.py  Build-Tooling (Python 3.9+, git; packwiz lädt es selbst)
 ```
 
@@ -169,6 +171,45 @@ python3 scripts/cozytoria.py assemble
 python3 scripts/cozytoria.py fetch-mods
 python3 scripts/cozytoria.py scan-clamav          # nur neue Dateien
 python3 scripts/cozytoria.py scan-clamav --full   # alles
+```
+
+## Rezeptkonflikte
+
+Jeder Build-Lauf prüft im Job **recipes**, ob ein Rezept aus unseren Mods (`overlay/mods`) oder aus unseren Overrides
+(`overlay/kubejs/data`) mit einem anderen Rezept im Pack kollidiert: Dieselbe Belegung passt auf beide, das Spiel
+nimmt dann eins davon, und das andere ist praktisch nicht craftbar. Formlose Rezepte kollidieren mit jeder Anordnung
+ihrer Zutaten, gespiegelte Muster zählen wie im Spiel als gleich. Verglichen werden Werkbank, Ofen-Typen und
+Schmiedetisch, eigene Stationen wie der Mechanical Crafter nur untereinander. Ergeben beide Rezepte dasselbe Item, ist
+das kein Konflikt. Ein Release gibt es nur, wenn der Check grün ist. Ein Craftoria-Update, das mit unseren Mods
+kollidiert, fällt so schon im Upstream-PR auf.
+
+Gelesen werden Rezepte und Item-Tags aus allen Mod-Jars (auch Jars in Jars), Minecraft, NeoForge, den
+OpenLoader-Packs und `kubejs/data`, samt Bedingungen wie `mod_loaded` und der Vereinheitlichung durch Almost Unified.
+**KubeJS-Skripte führt der Check nicht aus:** Rezepte und Tags, die Craftoria per Skript hinzufügt, ändert oder
+entfernt, sieht er nicht. Löst Craftoria einen Konflikt schon per Skript, das Paar in `recipe-allowlist.txt` eintragen.
+Nutzt ein Rezept einen eigenen Zutat-Typ einer Mod, gibt es dafür eine Warnung statt einer Prüfung.
+
+**Konflikt beheben:** Immer unser Rezept ändern, nicht das von Craftoria. Dazu eine JSON-Datei mit derselben ID unter
+`overlay/kubejs/data/<namespace>/recipe/<pfad>.json` anlegen, die Meldung nennt den genauen Pfad. KubeJS lädt den
+Ordner als Datapack über allen Mods, die Datei ersetzt also das Rezept der Mod. Als Vorlage das Original aus dem Jar
+der Mod nehmen (`data/<namespace>/recipe/<pfad>.json`) und das Muster ändern. Einzelne Items lassen sich aus einer
+Zutat herausnehmen, z. B. alle Bretter außer Palme:
+
+```json
+{"type": "neoforge:difference", "base": {"tag": "minecraft:planks"}, "subtracted": {"item": "beachparty:palm_planks"}}
+```
+
+Danach den Check erneut laufen lassen: Er prüft auch, ob das neue Muster frei ist.
+
+**Gewollte Überschneidung:** beide Rezept-IDs mit Begründung als Zeile in `recipe-allowlist.txt`. Kollidieren sie
+später nicht mehr, warnt der Check, dann kann der Eintrag raus.
+
+Lokal (lädt alle Mods, rund 1,3 GB, dazu den Minecraft-Server und NeoForge nach `build/recipes`):
+
+```bash
+python3 scripts/cozytoria.py assemble
+python3 scripts/cozytoria.py fetch-mods
+python3 scripts/cozytoria.py check-recipes
 ```
 
 ## Craftoria-Updates
