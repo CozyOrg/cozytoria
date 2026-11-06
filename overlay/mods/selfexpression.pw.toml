@@ -1,0 +1,13 @@
+name = "Selfexpression"
+filename = "selfexpression-2.22a-neoforge-1.21.1.jar"
+side = "both"
+
+[download]
+hash-format = "sha1"
+hash = "f0dd7e65512daec9ddea0fa54f02c48b4f2d3842"
+mode = "metadata:curseforge"
+
+[update]
+[update.curseforge]
+file-id = 6910114
+project-id = 921259

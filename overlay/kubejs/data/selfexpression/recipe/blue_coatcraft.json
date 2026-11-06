@@ -1,0 +1,30 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "pattern": [
+    "aba",
+    "cdc",
+    "aea"
+  ],
+  "key": {
+    "a": {
+      "item": "minecraft:blue_dye"
+    },
+    "b": {
+      "item": "minecraft:white_dye"
+    },
+    "c": {
+      "item": "selfexpression:cloth"
+    },
+    "d": {
+      "item": "selfexpression:base_chestplate"
+    },
+    "e": {
+      "item": "minecraft:gold_nugget"
+    }
+  },
+  "result": {
+    "id": "selfexpression:blue_coat_chestplate",
+    "count": 1
+  }
+}
