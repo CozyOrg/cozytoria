@@ -1,0 +1,13 @@
+name = "Immersive Flight Simulator [IFS] - Immersive Vehicles content pack"
+filename = "Immersive-Flight-Simulator 2.1.2 21.jar"
+side = "both"
+
+[download]
+hash-format = "sha1"
+hash = "57f4ca0ea0174e2d299faedc6d070d4387d185c4"
+mode = "metadata:curseforge"
+
+[update]
+[update.curseforge]
+file-id = 8503861
+project-id = 1381045
