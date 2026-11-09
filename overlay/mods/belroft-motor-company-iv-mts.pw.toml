@@ -1,0 +1,13 @@
+name = "Belroft Transport Empire (IV / MTS) - Boats, cars, vans, motorcycles & accessories! (Belroft Motor Company)"
+filename = "1.21.1-NeoForge-Belroft-Motors-Mk-15-5.jar"
+side = "both"
+
+[download]
+hash-format = "sha1"
+hash = "eee1fc6bbb66904ebbfa32579aee21698e4cfbca"
+mode = "metadata:curseforge"
+
+[update]
+[update.curseforge]
+file-id = 9388047
+project-id = 1618243

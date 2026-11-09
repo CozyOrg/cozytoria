@@ -1,0 +1,13 @@
+name = "Repair Car Pack [Immersive Vehicles/IV/MTS]"
+filename = "Repair_LancerEvoVIII_Pack-1.21.1.jar"
+side = "both"
+
+[download]
+hash-format = "sha1"
+hash = "59124a5c7565f36db5cfdaf6b1b935424191d77a"
+mode = "metadata:curseforge"
+
+[update]
+[update.curseforge]
+file-id = 7943452
+project-id = 1501425
