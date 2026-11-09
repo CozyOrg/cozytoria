@@ -1,0 +1,12 @@
+{
+  "damage": {
+    "bulletBlockBreaking": {
+      "value": false,
+      "comment": "Whether or not bullets/bombs can break blocks when they hit them.  This will also disable explosive block breakage (though not explosions themselves) and prevent incendiary bullets from setting blocks on fire."
+    },
+    "vehicleBlockBreaking": {
+      "value": false,
+      "comment": "Whether or not vehicles can break blocks when they run into them or blow up.  If false, vehicles will simply stop when they hit blocks."
+    }
+  }
+}
