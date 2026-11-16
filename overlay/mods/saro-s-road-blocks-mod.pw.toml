@@ -1,0 +1,13 @@
+name = "Saro´s Road Blocks"
+filename = "Saros-Road-Blocks-NeoForge-1.21.1-5.9.9.jar"
+side = "both"
+
+[download]
+hash-format = "sha1"
+hash = "7b61542ad8b6486c5b5a58be2314fbcd3ad7303d"
+mode = "metadata:curseforge"
+
+[update]
+[update.curseforge]
+file-id = 8795997
+project-id = 711583
